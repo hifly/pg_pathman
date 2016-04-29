@@ -33,6 +33,7 @@
 #include "utils/date.h"
 #include "utils/typcache.h"
 #include "utils/lsyscache.h"
+#include "utils/guc.h"
 #include "access/heapam.h"
 #include "access/nbtree.h"
 #include "storage/ipc.h"
@@ -54,6 +55,9 @@ typedef struct
 	List		   *args;
 	List		   *rangeset;
 } WrapperNode;
+
+bool pg_pathman_enable;
+PathmanState *pmstate;
 
 /* Original hooks */
 static set_rel_pathlist_hook_type set_rel_pathlist_hook_original = NULL;
@@ -77,6 +81,8 @@ static int append_child_relation(PlannerInfo *root, RelOptInfo *rel, Index rti,
 				RangeTblEntry *rte, int index, Oid childOID, List *wrappers);
 static Node *wrapper_make_expression(WrapperNode *wrap, int index, bool *alwaysTrue);
 static void disable_inheritance(Query *parse);
+static void disable_inheritance_cte(Query *parse);
+static void disable_inheritance_subselect(Query *parse);
 bool inheritance_disabled;
 
 /* Expression tree handlers */
@@ -152,6 +158,17 @@ _PG_init(void)
 	post_parse_analyze_hook = pathman_post_parse_analysis_hook;
 	planner_hook_original = planner_hook;
 	planner_hook = pathman_planner_hook;
+
+	DefineCustomBoolVariable("pg_pathman.enable",
+							 "Enables pg_pathman's optimizations during the planner stage",
+							 NULL,
+							 &pg_pathman_enable,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
 }
 
 void
@@ -192,8 +209,7 @@ get_cmp_func(Oid type1, Oid type2)
 
 	cmp_func = palloc(sizeof(FmgrInfo));
 	tce = lookup_type_cache(type1,
-							TYPECACHE_EQ_OPR | TYPECACHE_LT_OPR | TYPECACHE_GT_OPR |
-							TYPECACHE_CMP_PROC | TYPECACHE_CMP_PROC_FINFO);
+				TYPECACHE_BTREE_OPFAMILY | TYPECACHE_CMP_PROC | TYPECACHE_CMP_PROC_FINFO);
 	cmp_proc_oid = get_opfamily_proc(tce->btree_opf,
 									 type1,
 									 type2,
@@ -225,29 +241,24 @@ PlannedStmt *
 pathman_planner_hook(Query *parse, int cursorOptions, ParamListInfo boundParams)
 {
 	PlannedStmt	  *result;
-	ListCell	  *lc;
 
-	inheritance_disabled = false;
-	switch(parse->commandType)
+	if (pg_pathman_enable)
 	{
-		case CMD_SELECT:
-			disable_inheritance(parse);
-			break;
-		case CMD_UPDATE:
-		case CMD_DELETE:
-			handle_modification_query(parse);
-			break;
-		default:
-			break;
-	}
-
-	/* If query contains CTE (WITH statement) then handle subqueries too */
-	foreach(lc, parse->cteList)
-	{
-		CommonTableExpr *cte = (CommonTableExpr*) lfirst(lc);
-
-		if (IsA(cte->ctequery, Query))
-			disable_inheritance((Query *)cte->ctequery);
+		inheritance_disabled = false;
+		switch(parse->commandType)
+		{
+			case CMD_SELECT:
+				disable_inheritance(parse);
+				break;
+			case CMD_UPDATE:
+			case CMD_DELETE:
+				disable_inheritance_cte(parse);
+				disable_inheritance_subselect(parse);
+				handle_modification_query(parse);
+				break;
+			default:
+				break;
+		}
 	}
 
 	/* Invoke original hook */
@@ -266,10 +277,16 @@ pathman_planner_hook(Query *parse, int cursorOptions, ParamListInfo boundParams)
 static void
 disable_inheritance(Query *parse)
 {
-	RangeTblEntry *rte;
-	ListCell	  *lc;
+	ListCell		 *lc;
+	RangeTblEntry	 *rte;
 	PartRelationInfo *prel;
-	bool found;
+	bool	found;
+
+	/* If query contains CTE (WITH statement) then handle subqueries too */
+	disable_inheritance_cte(parse);
+
+	/* If query contains subselects */
+	disable_inheritance_subselect(parse);
 
 	foreach(lc, parse->rtable)
 	{
@@ -304,6 +321,38 @@ disable_inheritance(Query *parse)
 	}
 }
 
+static void
+disable_inheritance_cte(Query *parse)
+{
+	ListCell	  *lc;
+
+	foreach(lc, parse->cteList)
+	{
+		CommonTableExpr *cte = (CommonTableExpr*) lfirst(lc);
+
+		if (IsA(cte->ctequery, Query))
+			disable_inheritance((Query *) cte->ctequery);
+	}
+}
+
+static void
+disable_inheritance_subselect(Query *parse)
+{
+	Node		*quals;
+
+	if (!parse->jointree || !parse->jointree->quals)
+		return;
+
+	quals = parse->jointree->quals;
+	if (!IsA(quals, SubLink))
+		return;
+
+	if (!IsA(((SubLink *) quals)->subselect, Query))
+		return;
+
+	disable_inheritance((Query *) (((SubLink *) quals)->subselect));
+}
+
 /*
  * Checks if query is affects only one partition. If true then substitute
  */
@@ -311,8 +360,7 @@ static void
 handle_modification_query(Query *parse)
 {
 	PartRelationInfo *prel;
-	List	   *ranges,
-			   *wrappers = NIL;
+	List	   *ranges;
 	RangeTblEntry *rte;
 	WrapperNode *wrap;
 	Expr *expr;
@@ -336,7 +384,6 @@ handle_modification_query(Query *parse)
 
 	/* Parse syntax tree and extract partition ranges */
 	wrap = walk_expr_tree(expr, prel);
-	wrappers = lappend(wrappers, wrap);
 	ranges = irange_list_intersect(ranges, wrap->rangeset);
 
 	/* If only one partition is affected then substitute parent table with partition */
@@ -382,7 +429,15 @@ pathman_set_rel_pathlist_hook(PlannerInfo *root, RelOptInfo *rel, Index rti, Ran
 	RangeTblEntry **new_rte_array;
 	int len;
 	bool found;
-	int first_child_relid = 0;
+
+	/* Invoke original hook if needed */
+	if (set_rel_pathlist_hook_original != NULL)
+	{
+		set_rel_pathlist_hook_original(root, rel, rti, rte);
+	}
+
+	if (!pg_pathman_enable)
+		return;
 
 	/* This works only for SELECT queries */
 	if (root->parse->commandType != CMD_SELECT || !inheritance_disabled)
@@ -490,41 +545,18 @@ pathman_set_rel_pathlist_hook(PlannerInfo *root, RelOptInfo *rel, Index rti, Ran
 		foreach(lc, ranges)
 		{
 			IndexRange	irange = lfirst_irange(lc);
-			Oid			childOid;
 
 			for (i = irange_lower(irange); i <= irange_upper(irange); i++)
-			{
-				int idx;
+				append_child_relation(root, rel, rti, rte, i, dsm_arr[i], wrappers);
 
-				childOid = dsm_arr[i];
-				idx = append_child_relation(root, rel, rti, rte, i, childOid, wrappers);
-
-				if (!first_child_relid)
-					first_child_relid = idx;
-			}
 		}
 
 		/* Clear old path list */
 		list_free(rel->pathlist);
 
-		/* Set apropriate varnos */
-		if (first_child_relid)
-		{
-			change_varnos((Node *) root->canon_pathkeys, rti, first_child_relid);
-			change_varnos((Node *) root->eq_classes, rti, first_child_relid);
-			change_varnos((Node *) root->parse->targetList, rti, first_child_relid);
-			change_varnos((Node *) rel->reltargetlist, rti, first_child_relid);
-		}
-
 		rel->pathlist = NIL;
 		set_append_rel_pathlist(root, rel, rti, rte, pathkeyAsc, pathkeyDesc);
 		set_append_rel_size(root, rel, rti, rte);
-	}
-
-	/* Invoke original hook if needed */
-	if (set_rel_pathlist_hook_original != NULL)
-	{
-		set_rel_pathlist_hook_original(root, rel, rti, rte);
 	}
 }
 
@@ -692,10 +724,6 @@ append_child_relation(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		}
 	}
 	childrel->has_eclass_joins = rel->has_eclass_joins;
-
-	/* Add child to relids */
-	rel->relids = bms_add_member(rel->relids, childRTindex);
-	root->all_baserels = bms_add_member(root->all_baserels, childRTindex);
 
 	/* Recalc parent relation tuples count */
 	rel->tuples += childrel->tuples;
@@ -967,7 +995,7 @@ handle_binary_opexpr(const PartRelationInfo *prel, WrapperNode *result,
 
 	/* Determine operator type */
 	tce = lookup_type_cache(v->vartype,
-		TYPECACHE_EQ_OPR | TYPECACHE_LT_OPR | TYPECACHE_GT_OPR | TYPECACHE_CMP_PROC | TYPECACHE_CMP_PROC_FINFO);
+		TYPECACHE_BTREE_OPFAMILY | TYPECACHE_CMP_PROC | TYPECACHE_CMP_PROC_FINFO);
 	strategy = get_op_opfamily_strategy(expr->opno, tce->btree_opf);
 	cmp_proc_oid = get_opfamily_proc(tce->btree_opf,
 									 c->consttype,
@@ -1019,14 +1047,14 @@ handle_binary_opexpr(const PartRelationInfo *prel, WrapperNode *result,
 
 					if ((cmp_min < 0 &&
 						 (strategy == BTLessEqualStrategyNumber ||
-						  strategy == BTEqualStrategyNumber)) || 
+						  strategy == BTEqualStrategyNumber)) ||
 						(cmp_min <= 0 && strategy == BTLessStrategyNumber))
 					{
 						result->rangeset = NIL;
 						return;
 					}
 
-					if (cmp_max >= 0 && (strategy == BTGreaterEqualStrategyNumber || 
+					if (cmp_max >= 0 && (strategy == BTGreaterEqualStrategyNumber ||
 						strategy == BTGreaterStrategyNumber ||
 						strategy == BTEqualStrategyNumber))
 					{
@@ -1034,14 +1062,14 @@ handle_binary_opexpr(const PartRelationInfo *prel, WrapperNode *result,
 						return;
 					}
 
-					if ((cmp_min < 0 && strategy == BTGreaterStrategyNumber) || 
+					if ((cmp_min < 0 && strategy == BTGreaterStrategyNumber) ||
 						(cmp_min <= 0 && strategy == BTGreaterEqualStrategyNumber))
 					{
 						result->rangeset = list_make1_irange(make_irange(startidx, endidx, false));
 						return;
 					}
 
-					if (cmp_max >= 0 && (strategy == BTLessEqualStrategyNumber || 
+					if (cmp_max >= 0 && (strategy == BTLessEqualStrategyNumber ||
 						strategy == BTLessStrategyNumber))
 					{
 						result->rangeset = list_make1_irange(make_irange(startidx, endidx, false));
