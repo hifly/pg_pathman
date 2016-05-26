@@ -1,3 +1,12 @@
+/* ------------------------------------------------------------------------
+ *
+ * nodes_common.h
+ *		Common function prototypes and structs for custom nodes
+ *
+ * Copyright (c) 2016, Postgres Professional
+ *
+ * ------------------------------------------------------------------------
+ */
 #ifndef NODES_COMMON_H
 #define NODES_COMMON_H
 
@@ -5,18 +14,16 @@
 #include "pathman.h"
 
 
-/*
- * Element of the plan_state_table
- */
-typedef struct
-{
-	Oid			relid;				/* partition relid (key) */
-	PlanState  *ps;					/* reusable plan state */
-} PreservedPlanState;
-
 typedef struct
 {
 	Oid			relid;				/* partition relid */
+
+	enum
+	{
+		CHILD_PATH = 0,
+		CHILD_PLAN,
+		CHILD_PLAN_STATE
+	}		content_type;
 
 	union
 	{
@@ -25,7 +32,7 @@ typedef struct
 		PlanState  *plan_state;
 	}			content;
 
-	int			original_order;		/* for sorting in EXPLAIN */
+	int		original_order;			/* for sorting in EXPLAIN */
 } ChildScanCommonData;
 
 typedef ChildScanCommonData *ChildScanCommon;
@@ -44,11 +51,14 @@ clear_plan_states(CustomScanState *scan_state)
 	}
 }
 
+Oid * get_partition_oids(List *ranges, int *n, PartRelationInfo *prel);
+
 Path * create_append_path_common(PlannerInfo *root,
 								 AppendPath *inner_append,
 								 ParamPathInfo *param_info,
-								 List *picky_clauses,
-								 CustomPathMethods *path_methods);
+								 CustomPathMethods *path_methods,
+								 uint32 size,
+								 double sel);
 
 Plan * create_append_plan_common(PlannerInfo *root, RelOptInfo *rel,
 								 CustomPath *best_path, List *tlist,
@@ -60,6 +70,9 @@ Node * create_append_scan_state_common(CustomScan *node,
 									   uint32 size);
 
 void begin_append_common(CustomScanState *node, EState *estate, int eflags);
+
+TupleTableSlot * exec_append_common(CustomScanState *node,
+									void (*fetch_next_tuple) (CustomScanState *node));
 
 void end_append_common(CustomScanState *node);
 

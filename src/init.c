@@ -174,11 +174,11 @@ load_relations_hashtable(bool reinitialize)
 	ListCell   *lc;
 	char	   *schema;
 	PartRelationInfo *prel;
-	char		sql[] = "SELECT pg_class.relfilenode, pg_attribute.attnum, cfg.parttype, pg_attribute.atttypid "
+	char		sql[] = "SELECT pg_class.oid, pg_attribute.attnum, cfg.parttype, pg_attribute.atttypid "
 						"FROM %s.pathman_config as cfg "
-						"JOIN pg_class ON pg_class.relfilenode = cfg.relname::regclass::oid "
+						"JOIN pg_class ON pg_class.oid = cfg.relname::regclass::oid "
 						"JOIN pg_attribute ON pg_attribute.attname = lower(cfg.attname) "
-						"AND attrelid = pg_class.relfilenode";
+						"AND attrelid = pg_class.oid";
 	char *query;
 
 	SPI_connect();
@@ -284,7 +284,7 @@ load_check_constraints(Oid parent_oid, Snapshot snapshot)
 	Datum	vals[1];
 	Oid		oids[1] = {INT4OID};
 	bool	nulls[1] = {false};
-	
+
 	vals[0] = Int32GetDatum(parent_oid);
 	prel = get_pathman_relation_info(parent_oid, NULL);
 
@@ -351,7 +351,7 @@ load_check_constraints(Oid parent_oid, Snapshot snapshot)
 					 HeapTupleGetOid(tuple));
 			conbin = TextDatumGetCString(val);
 			expr = (Expr *) stringToNode(conbin);
-			
+
 			switch(prel->parttype)
 			{
 				case PT_RANGE:
@@ -378,7 +378,7 @@ load_check_constraints(Oid parent_oid, Snapshot snapshot)
 					re.child_oid = con->conrelid;
 					ranges[i] = re;
 					break;
-			
+
 				case PT_HASH:
 					if (!validate_hash_constraint(expr, prel, &hash))
 					{
@@ -398,8 +398,7 @@ load_check_constraints(Oid parent_oid, Snapshot snapshot)
 			bool byVal = rangerel->by_val;
 
 			/* Sort ascending */
-			tce = lookup_type_cache(prel->atttype,
-				TYPECACHE_CMP_PROC | TYPECACHE_CMP_PROC_FINFO);
+			tce = lookup_type_cache(prel->atttype, TYPECACHE_CMP_PROC | TYPECACHE_CMP_PROC_FINFO);
 			qsort_type_cmp_func = &tce->cmp_proc_finfo;
 			globalByVal = byVal;
 			qsort(ranges, proc, sizeof(RangeEntry), cmp_range_entries);
@@ -458,7 +457,7 @@ validate_range_constraint(Expr *expr, PartRelationInfo *prel, Datum *min, Datum 
 	if (!and_clause((Node *) expr))
 		return false;
 
-	tce = lookup_type_cache(prel->atttype, TYPECACHE_EQ_OPR | TYPECACHE_LT_OPR | TYPECACHE_GT_OPR);
+	tce = lookup_type_cache(prel->atttype, TYPECACHE_BTREE_OPFAMILY);
 
 	/* check that left operand is >= operator */
 	opexpr = (OpExpr *) linitial(boolexpr->args);
@@ -517,7 +516,7 @@ validate_hash_constraint(Expr *expr, PartRelationInfo *prel, int *hash)
 	eqexpr = (OpExpr *) expr;
 
 	/* Is this an equality operator? */
-	tce = lookup_type_cache(prel->atttype, TYPECACHE_EQ_OPR);
+	tce = lookup_type_cache(prel->atttype, TYPECACHE_BTREE_OPFAMILY);
 	if (get_op_opfamily_strategy(eqexpr->opno, tce->btree_opf) != BTEqualStrategyNumber)
 		return false;
 

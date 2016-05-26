@@ -159,11 +159,6 @@ find_or_create_range_partition(PG_FUNCTION_ARGS)
 		/* Start background worker to create new partitions */
 		child_oid = create_partitions_bg_worker(relid, value, value_type, &crashed);
 
-		// SPI_connect();
-		// child_oid = create_partitions(relid, value, value_type, &crashed);
-		// SPI_finish();
-		// elog(WARNING, "Worker finished");
-
 		/* Release locks */
 		if (!crashed)
 		{
@@ -172,8 +167,7 @@ find_or_create_range_partition(PG_FUNCTION_ARGS)
 		}
 
 		/* Repeat binary search */
-		ranges = dsm_array_get_pointer(&rangerel->ranges);
-		pos = range_binary_search(rangerel, &cmp_func, value, &found);
+		(void) range_binary_search(rangerel, &cmp_func, value, &found);
 		if (found)
 			PG_RETURN_OID(child_oid);
 	}
@@ -384,3 +378,13 @@ release_partitions_lock(PG_FUNCTION_ARGS)
 	LWLockRelease(pmstate->edit_partitions_lock);
 	PG_RETURN_NULL();
 }
+
+
+// Datum
+
+// names = stringToQualifiedNameList(class_name_or_oid);
+
+// ident 
+// bool
+// SplitIdentifierString(char *rawstring, char separator,
+// 					  List **namelist)
