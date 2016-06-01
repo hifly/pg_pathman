@@ -10,7 +10,6 @@
 #ifndef JOIN_HOOK_H
 #define JOIN_HOOK_H
 
-#include "postgres.h"
 #include "optimizer/paths.h"
 
 extern set_join_pathlist_hook_type		set_join_pathlist_next;

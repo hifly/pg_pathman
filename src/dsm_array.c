@@ -12,7 +12,6 @@
 #include "pathman.h"
 #include "storage/shmem.h"
 #include "storage/dsm.h"
-#include "storage/lwlock.h"
 #include <stdint.h>
 
 

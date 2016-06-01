@@ -10,17 +10,12 @@
 #include "postgres.h"
 #include "runtime_merge_append.h"
 
-#include "pathman.h"
-
-#include "optimizer/clauses.h"
 #include "optimizer/cost.h"
-#include "optimizer/restrictinfo.h"
 #include "optimizer/planmain.h"
 #include "optimizer/tlist.h"
 #include "optimizer/var.h"
 #include "miscadmin.h"
 #include "utils/lsyscache.h"
-#include "utils/memutils.h"
 
 #include "lib/binaryheap.h"
 

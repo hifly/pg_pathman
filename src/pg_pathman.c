@@ -25,24 +25,22 @@
 #include "optimizer/cost.h"
 #include "parser/analyze.h"
 #include "utils/hsearch.h"
-#include "utils/tqual.h"
 #include "utils/rel.h"
 #include "utils/elog.h"
 #include "utils/array.h"
-#include "utils/date.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
 #include "access/heapam.h"
 #include "access/nbtree.h"
 #include "storage/ipc.h"
-#include "catalog/pg_operator.h"
 #include "catalog/pg_type.h"
 #include "foreign/fdwapi.h"
 #include "hooks.h"
 #include "utils.h"
 #include "runtimeappend.h"
 #include "runtime_merge_append.h"
+#include "update_node.h"
 
 PG_MODULE_MAGIC;
 
@@ -183,6 +181,10 @@ _PG_init(void)
 	runtime_merge_append_exec_methods.RestrPosCustomScan	= NULL;
 	runtime_merge_append_exec_methods.ExplainCustomScan		= runtimemergeappend_explain;
 
+	/* Update node */
+	(void) setup_update_exec_methods();
+
+	/* Variables */
 	DefineCustomBoolVariable("pg_pathman.enable",
 							 "Enables pg_pathman's optimizations during the planner stage",
 							 NULL,
@@ -288,6 +290,20 @@ pathman_planner_hook(Query *parse, int cursorOptions, ParamListInfo boundParams)
 				disable_inheritance(parse);
 				break;
 			case CMD_UPDATE:
+				{
+					ListCell *lc;
+
+					disable_inheritance_cte(parse);
+					disable_inheritance_subselect(parse);
+
+					result = standard_planner(parse, cursorOptions, boundParams);
+
+					add_filter(result->planTree);
+					foreach (lc, result->subplans)
+						add_filter((Plan *) lfirst(lc));
+
+					return result;
+				}
 			case CMD_DELETE:
 				disable_inheritance_cte(parse);
 				disable_inheritance_subselect(parse);

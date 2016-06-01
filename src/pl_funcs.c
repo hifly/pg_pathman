@@ -13,10 +13,6 @@
 #include "utils/array.h"
 #include "utils/snapmgr.h"
 #include "access/nbtree.h"
-#include "access/xact.h"
-#include "catalog/pg_type.h"
-#include "executor/spi.h"
-#include "storage/lmgr.h"
 
 
 /* declarations */
