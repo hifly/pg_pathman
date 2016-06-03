@@ -298,9 +298,10 @@ pathman_planner_hook(Query *parse, int cursorOptions, ParamListInfo boundParams)
 
 					result = standard_planner(parse, cursorOptions, boundParams);
 
-					add_filter(result->planTree);
-					foreach (lc, result->subplans)
-						add_filter((Plan *) lfirst(lc));
+					// add_filter(result->planTree);
+					result->planTree = CreateUpdateScanPlan(result->planTree);
+					// foreach (lc, result->subplans)
+					// 	add_filter((Plan *) lfirst(lc));
 
 					return result;
 				}
