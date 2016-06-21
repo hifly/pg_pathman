@@ -11,15 +11,12 @@
 #include "miscadmin.h"
 #include "executor/spi.h"
 #include "catalog/pg_type.h"
-#include "catalog/pg_class.h"
 #include "catalog/pg_constraint.h"
-#include "catalog/pg_operator.h"
 #include "access/htup_details.h"
 #include "utils/syscache.h"
 #include "utils/builtins.h"
 #include "utils/typcache.h"
 #include "utils/lsyscache.h"
-#include "utils/bytea.h"
 #include "utils/snapmgr.h"
 #include "optimizer/clauses.h"
 
@@ -60,9 +57,9 @@ init_shmem_config()
 		if (!IsUnderPostmaster)
 		{
 			/* Initialize locks */
-			pmstate->load_config_lock = LWLockAssign();
-			pmstate->dsm_init_lock    = LWLockAssign();
-			pmstate->edit_partitions_lock = LWLockAssign();
+			pmstate->load_config_lock		= LWLockAssign();
+			pmstate->dsm_init_lock			= LWLockAssign();
+			pmstate->edit_partitions_lock	= LWLockAssign();
 		}
 #ifdef WIN32
 		else
@@ -101,20 +98,20 @@ load_config(void)
 		 * oid into it. This array contains databases oids
 		 * that have already been cached (to prevent repeat caching)
 		 */
-		if (&pmstate->databases.length > 0)
+		if (&pmstate->databases.elem_count > 0)
 			free_dsm_array(&pmstate->databases);
 		alloc_dsm_array(&pmstate->databases, sizeof(Oid), 1);
-		databases = (Oid *) dsm_array_get_pointer(&pmstate->databases);
+		databases = (Oid *) dsm_array_get_pointer(&pmstate->databases, false);
 		databases[0] = MyDatabaseId;
 	}
 	else
 	{
-		int databases_count = pmstate->databases.length;
+		int databases_count = pmstate->databases.elem_count;
 		int i;
 
 		/* Check if we already cached config for current database */
-		databases = (Oid *) dsm_array_get_pointer(&pmstate->databases);
-		for(i=0; i<databases_count; i++)
+		databases = (Oid *) dsm_array_get_pointer(&pmstate->databases, false);
+		for(i = 0; i < databases_count; i++)
 			if (databases[i] == MyDatabaseId)
 			{
 				LWLockRelease(pmstate->dsm_init_lock);
@@ -123,7 +120,7 @@ load_config(void)
 
 		/* Put current database oid to databases list */
 		resize_dsm_array(&pmstate->databases, sizeof(Oid), databases_count + 1);
-		databases = (Oid *) dsm_array_get_pointer(&pmstate->databases);
+		databases = (Oid *) dsm_array_get_pointer(&pmstate->databases, false);
 		databases[databases_count] = MyDatabaseId;
 	}
 
@@ -173,8 +170,10 @@ load_relations_hashtable(bool reinitialize)
 	List	   *part_oids = NIL;
 	ListCell   *lc;
 	char	   *schema;
+	TypeCacheEntry *tce;
 	PartRelationInfo *prel;
-	char		sql[] = "SELECT pg_class.oid, pg_attribute.attnum, cfg.parttype, pg_attribute.atttypid "
+	char		sql[] = "SELECT pg_class.oid, pg_attribute.attnum,"
+								"cfg.parttype, pg_attribute.atttypid, pg_attribute.atttypmod "
 						"FROM %s.pathman_config as cfg "
 						"JOIN pg_class ON pg_class.oid = cfg.relname::regclass::oid "
 						"JOIN pg_attribute ON pg_attribute.attname = lower(cfg.attname) "
@@ -201,11 +200,11 @@ load_relations_hashtable(bool reinitialize)
 		TupleDesc tupdesc = SPI_tuptable->tupdesc;
 		SPITupleTable *tuptable = SPI_tuptable;
 
-		for (i=0; i<proc; i++)
+		for (i = 0; i < proc; i++)
 		{
 			RelationKey key;
 			HeapTuple tuple = tuptable->vals[i];
-			int oid = DatumGetObjectId(SPI_getbinval(tuple, tupdesc, 1, &isnull));
+			Oid oid = DatumGetObjectId(SPI_getbinval(tuple, tupdesc, 1, &isnull));
 
 			key.dbid = MyDatabaseId;
 			key.relid = oid;
@@ -215,6 +214,11 @@ load_relations_hashtable(bool reinitialize)
 			prel->attnum = DatumGetInt32(SPI_getbinval(tuple, tupdesc, 2, &isnull));
 			prel->parttype = DatumGetInt32(SPI_getbinval(tuple, tupdesc, 3, &isnull));
 			prel->atttype = DatumGetObjectId(SPI_getbinval(tuple, tupdesc, 4, &isnull));
+			prel->atttypmod = DatumGetInt32(SPI_getbinval(tuple, tupdesc, 5, &isnull));
+
+			tce = lookup_type_cache(prel->atttype, 	TYPECACHE_CMP_PROC | TYPECACHE_HASH_PROC);
+			prel->cmp_proc = tce->cmp_proc;
+			prel->hash_proc = tce->hash_proc;
 
 			part_oids = lappend_int(part_oids, oid);
 		}
@@ -230,7 +234,7 @@ load_relations_hashtable(bool reinitialize)
 		switch(prel->parttype)
 		{
 			case PT_RANGE:
-				if (reinitialize && prel->children.length > 0)
+				if (reinitialize && prel->children.elem_count > 0)
 				{
 					RangeRelation *rangerel = get_pathman_range_relation(oid, NULL);
 					free_dsm_array(&prel->children);
@@ -240,7 +244,7 @@ load_relations_hashtable(bool reinitialize)
 				load_check_constraints(oid, GetCatalogSnapshot(oid));
 				break;
 			case PT_HASH:
-				if (reinitialize && prel->children.length > 0)
+				if (reinitialize && prel->children.elem_count > 0)
 				{
 					free_dsm_array(&prel->children);
 					prel->children_count = 0;
@@ -289,7 +293,7 @@ load_check_constraints(Oid parent_oid, Snapshot snapshot)
 	prel = get_pathman_relation_info(parent_oid, NULL);
 
 	/* Skip if already loaded */
-	if (prel->children.length > 0)
+	if (prel->children.elem_count > 0)
 		return;
 
 	plan = SPI_prepare("select pg_constraint.* "
@@ -312,7 +316,7 @@ load_check_constraints(Oid parent_oid, Snapshot snapshot)
 		int hash;
 
 		alloc_dsm_array(&prel->children, sizeof(Oid), proc);
-		children = (Oid *) dsm_array_get_pointer(&prel->children);
+		children = (Oid *) dsm_array_get_pointer(&prel->children, false);
 
 		if (prel->parttype == PT_RANGE)
 		{
@@ -325,13 +329,13 @@ load_check_constraints(Oid parent_oid, Snapshot snapshot)
 				hash_search(range_restrictions, (void *) &key, HASH_ENTER, &found);
 
 			alloc_dsm_array(&rangerel->ranges, sizeof(RangeEntry), proc);
-			ranges = (RangeEntry *) dsm_array_get_pointer(&rangerel->ranges);
+			ranges = (RangeEntry *) dsm_array_get_pointer(&rangerel->ranges, false);
 
 			tce = lookup_type_cache(prel->atttype, 0);
 			rangerel->by_val = tce->typbyval;
 		}
 
-		for (i=0; i<proc; i++)
+		for (i = 0; i < proc; i++)
 		{
 			RangeEntry	re;
 			HeapTuple	tuple = tuptable->vals[i];
@@ -357,9 +361,10 @@ load_check_constraints(Oid parent_oid, Snapshot snapshot)
 				case PT_RANGE:
 					if (!validate_range_constraint(expr, prel, &min, &max))
 					{
-						elog(WARNING, "Range constraint for relation %u MUST have exact format: "
+						elog(WARNING, "Wrong CHECK constraint for relation '%s'. "
+									  "It MUST have exact format: "
 									  "VARIABLE >= CONST AND VARIABLE < CONST. Skipping...",
-							 (Oid) con->conrelid);
+							 get_rel_name(con->conrelid));
 						continue;
 					}
 
@@ -382,9 +387,9 @@ load_check_constraints(Oid parent_oid, Snapshot snapshot)
 				case PT_HASH:
 					if (!validate_hash_constraint(expr, prel, &hash))
 					{
-						elog(WARNING, "Hash constraint for relation %u MUST have exact format: "
-									  "VARIABLE %% CONST = CONST. Skipping...",
-							 (Oid) con->conrelid);
+						elog(WARNING, "Wrong CHECK constraint format for relation '%s'. "
+									  "Skipping...",
+							 get_rel_name(con->conrelid));
 						continue;
 					}
 					children[hash] = con->conrelid;
@@ -398,7 +403,7 @@ load_check_constraints(Oid parent_oid, Snapshot snapshot)
 			bool byVal = rangerel->by_val;
 
 			/* Sort ascending */
-			tce = lookup_type_cache(prel->atttype, TYPECACHE_CMP_PROC | TYPECACHE_CMP_PROC_FINFO);
+			tce = lookup_type_cache(prel->atttype, TYPECACHE_CMP_PROC_FINFO);
 			qsort_type_cmp_func = &tce->cmp_proc_finfo;
 			globalByVal = byVal;
 			qsort(ranges, proc, sizeof(RangeEntry), cmp_range_entries);
@@ -507,41 +512,57 @@ read_opexpr_const(OpExpr *opexpr, int varattno, Datum *val)
 static bool
 validate_hash_constraint(Expr *expr, PartRelationInfo *prel, int *hash)
 {
-	OpExpr *eqexpr;
-	OpExpr *modexpr;
+	OpExpr	   *eqexpr;
 	TypeCacheEntry *tce;
+	FuncExpr   *gethashfunc;
+	FuncExpr   *funcexpr;
+	Var		   *var;
 
 	if (!IsA(expr, OpExpr))
 		return false;
 	eqexpr = (OpExpr *) expr;
 
+	/*
+	 * We expect get_hash() function on the left
+	 * TODO: check that it is really the 'get_hash' function
+	 */
+	if (!IsA(linitial(eqexpr->args), FuncExpr))
+		return false;
+	gethashfunc = (FuncExpr *) linitial(eqexpr->args);
+
 	/* Is this an equality operator? */
-	tce = lookup_type_cache(prel->atttype, TYPECACHE_BTREE_OPFAMILY);
+	tce = lookup_type_cache(gethashfunc->funcresulttype, TYPECACHE_BTREE_OPFAMILY);
 	if (get_op_opfamily_strategy(eqexpr->opno, tce->btree_opf) != BTEqualStrategyNumber)
 		return false;
 
-	if (!IsA(linitial(eqexpr->args), OpExpr))
-		return false;
-
-	/* Is this a modulus operator? */
-	modexpr = (OpExpr *) linitial(eqexpr->args);
-	if (modexpr->opno != 530 && modexpr->opno != 439 && modexpr->opno && modexpr->opno != 529)
-		return false;
-
-	if (list_length(modexpr->args) == 2)
+	if (list_length(gethashfunc->args) == 2)
 	{
-		Node *left = linitial(modexpr->args);
-		Node *right = lsecond(modexpr->args);
+		Node *first = linitial(gethashfunc->args);
+		Node *second = lsecond(gethashfunc->args);
 		Const *mod_result;
 
-		if ( !IsA(left, Var) || !IsA(right, Const) )
-			return false;
-		if ( ((Var*) left)->varattno != prel->attnum )
-			return false;
-		if (DatumGetInt32(((Const*) right)->constvalue) != prel->children.length)
+		if (!IsA(first, FuncExpr) || !IsA(second, Const))
 			return false;
 
-		if ( !IsA(lsecond(eqexpr->args), Const) )
+		/* Check that function is the base hash function for the type  */
+		funcexpr = (FuncExpr *) first;
+		if (funcexpr->funcid != prel->hash_proc ||
+			(!IsA(linitial(funcexpr->args), Var) && !IsA(linitial(funcexpr->args), RelabelType)))
+			return false;
+
+		/* Check that argument is partitioning key attribute */
+		if (IsA(linitial(funcexpr->args), RelabelType))
+			var = (Var *) ((RelabelType *) linitial(funcexpr->args))->arg;
+		else
+			var = (Var *) linitial(funcexpr->args);
+		if (var->varattno != prel->attnum)
+			return false;
+
+		/* Check that const value less than partitions count */
+		if (DatumGetInt32(((Const*) second)->constvalue) != prel->children.elem_count)
+			return false;
+
+		if (!IsA(lsecond(eqexpr->args), Const))
 			return false;
 
 		mod_result = lsecond(eqexpr->args);
@@ -575,7 +596,7 @@ remove_relation_info(Oid relid)
 {
 	PartRelationInfo   *prel;
 	RangeRelation	   *rangerel;
-	RelationKey key;
+	RelationKey			key;
 
 	key.dbid = MyDatabaseId;
 	key.relid = relid;

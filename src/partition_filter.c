@@ -1,4 +1,5 @@
 #include "partition_filter.h"
+#include "utils.h"
 #include "utils/guc.h"
 #include "nodes/nodeFuncs.h"
 
@@ -40,8 +41,8 @@ init_partition_filter_static_data(void)
 }
 
 Plan *
-make_partition_filter_plan(Plan *subplan, Oid partitioned_table,
-						   OnConflictAction	conflict_action)
+make_partition_filter(Plan *subplan, Oid partitioned_table,
+					  OnConflictAction conflict_action)
 {
 	CustomScan *cscan = makeNode(CustomScan);
 
@@ -69,8 +70,9 @@ make_partition_filter_plan(Plan *subplan, Oid partitioned_table,
 Node *
 partition_filter_create_scan_state(CustomScan *node)
 {
-	PartitionFilterState   *state = palloc0(sizeof(PartitionFilterState));
+	PartitionFilterState   *state;
 
+	state = (PartitionFilterState *) palloc0(sizeof(PartitionFilterState));
 	NodeSetTag(state, T_CustomScanState);
 
 	state->css.flags = node->flags;
@@ -102,6 +104,7 @@ partition_filter_begin(CustomScanState *node, EState *estate, int eflags)
 
 	node->custom_ps = list_make1(ExecInitNode(state->subplan, estate, eflags));
 	state->prel = get_pathman_relation_info(state->partitioned_table, NULL);
+	state->savedRelInfo = NULL;
 
 	memset(result_rels_table_config, 0, sizeof(HASHCTL));
 	result_rels_table_config->keysize = sizeof(Oid);
@@ -123,46 +126,61 @@ partition_filter_exec(CustomScanState *node)
 
 	PartitionFilterState   *state = (PartitionFilterState *) node;
 
+	ExprContext			   *econtext = node->ss.ps.ps_ExprContext;
 	EState				   *estate = node->ss.ps.state;
 	PlanState			   *child_ps = (PlanState *) linitial(node->custom_ps);
 	TupleTableSlot		   *slot;
 
 	slot = ExecProcNode(child_ps);
 
+	/* Save original ResultRelInfo */
+	if (!state->savedRelInfo)
+		state->savedRelInfo = estate->es_result_relation_info;
+
 	if (!TupIsNull(slot))
 	{
-		WalkerContext	wcxt;
 		List		   *ranges;
 		int				nparts;
 		Oid			   *parts;
+		Oid				selected_partid;
 
 		bool			isnull;
 		AttrNumber		attnum = state->prel->attnum;
 		Datum			value = slot_getattr(slot, attnum, &isnull);
 
+		/* Fill const with value ... */
 		state->temp_const.constvalue = value;
 		state->temp_const.constisnull = isnull;
 
+		/* ... and some other important data */
 		CopyToTempConst(consttype,   atttypid);
 		CopyToTempConst(consttypmod, atttypmod);
 		CopyToTempConst(constcollid, attcollation);
 		CopyToTempConst(constlen,    attlen);
 		CopyToTempConst(constbyval,  attbyval);
 
-		wcxt.prel = state->prel;
-		wcxt.econtext = NULL;
-		wcxt.hasLeast = false;
-		wcxt.hasGreatest = false;
+		InitWalkerContextCustomNode(&state->wcxt, state->prel,
+									econtext, &state->wcxt_cached);
 
-		ranges = walk_expr_tree((Expr *) &state->temp_const, &wcxt)->rangeset;
+		ranges = walk_expr_tree((Expr *) &state->temp_const, &state->wcxt)->rangeset;
 		parts = get_partition_oids(ranges, &nparts, state->prel);
 
 		if (nparts > 1)
 			elog(ERROR, "PartitionFilter selected more than one partition");
 		else if (nparts == 0)
-			elog(ERROR, "PartitionFilter could not select suitable partition");
+		{
+			selected_partid = create_partitions_bg_worker(state->partitioned_table,
+														  state->temp_const.constvalue,
+														  state->temp_const.consttype);
 
-		estate->es_result_relation_info = getResultRelInfo(parts[0], state);
+			refresh_walker_context_ranges(&state->wcxt);
+		}
+		else
+			selected_partid = parts[0];
+
+		/* Replace main table with suitable partition */
+		estate->es_result_relation_info = getResultRelInfo(selected_partid,
+														   state);
 
 		return slot;
 	}
@@ -185,11 +203,12 @@ partition_filter_end(CustomScanState *node)
 		heap_close(rri_handle->resultRelInfo->ri_RelationDesc,
 				   RowExclusiveLock);
 	}
-
 	hash_destroy(state->result_rels_table);
 
 	Assert(list_length(node->custom_ps) == 1);
 	ExecEndNode((PlanState *) linitial(node->custom_ps));
+
+	clear_walker_context(&state->wcxt);
 }
 
 void
@@ -209,6 +228,17 @@ partition_filter_explain(CustomScanState *node, List *ancestors, ExplainState *e
 static ResultRelInfo *
 getResultRelInfo(Oid partid, PartitionFilterState *state)
 {
+#define CopyToResultRelInfo(field_name) \
+	( resultRelInfo->field_name = state->savedRelInfo->field_name )
+
+#define ResizeTriggerField(field_name, field_type) \
+	do { \
+		if (resultRelInfo->field_name) \
+			pfree(resultRelInfo->field_name); \
+		resultRelInfo->field_name = (field_type *) \
+			palloc0(resultRelInfo->ri_TrigDesc->numtriggers * sizeof(field_type)); \
+	} while (0)
+
 	ResultRelInfoHandle	   *resultRelInfoHandle;
 	bool					found;
 
@@ -218,13 +248,44 @@ getResultRelInfo(Oid partid, PartitionFilterState *state)
 
 	if (!found)
 	{
-		ResultRelInfo *resultRelInfo = (ResultRelInfo *) palloc(sizeof(ResultRelInfo));
+		bool			grown_up;
+		ResultRelInfo  *resultRelInfo = (ResultRelInfo *) palloc(sizeof(ResultRelInfo));
+
 		InitResultRelInfo(resultRelInfo,
 						  heap_open(partid, RowExclusiveLock),
 						  0,
 						  state->css.ss.ps.state->es_instrument);
 
 		ExecOpenIndices(resultRelInfo, state->onConflictAction != ONCONFLICT_NONE);
+
+		resultRelInfo->ri_TrigDesc = append_trigger_descs(resultRelInfo->ri_TrigDesc,
+														  state->savedRelInfo->ri_TrigDesc,
+														  &grown_up);
+		if (grown_up)
+		{
+			ResizeTriggerField(ri_TrigFunctions, FmgrInfo);
+			ResizeTriggerField(ri_TrigWhenExprs, List *);
+
+			if (resultRelInfo->ri_TrigInstrument)
+			{
+				pfree(resultRelInfo->ri_TrigInstrument);
+
+				resultRelInfo->ri_TrigInstrument =
+					InstrAlloc(resultRelInfo->ri_TrigDesc->numtriggers,
+							   state->css.ss.ps.state->es_instrument);
+			}
+		}
+
+		/* Copy necessary fields from saved ResultRelInfo */
+		CopyToResultRelInfo(ri_WithCheckOptions);
+		CopyToResultRelInfo(ri_WithCheckOptionExprs);
+		CopyToResultRelInfo(ri_junkFilter);
+		CopyToResultRelInfo(ri_projectReturning);
+		CopyToResultRelInfo(ri_onConflictSetProj);
+		CopyToResultRelInfo(ri_onConflictSetWhere);
+
+		/* ri_ConstraintExprs will be initialized by ExecRelCheck() */
+		resultRelInfo->ri_ConstraintExprs = NULL;
 
 		resultRelInfoHandle->partid = partid;
 		resultRelInfoHandle->resultRelInfo = resultRelInfo;
@@ -265,16 +326,23 @@ pfilter_build_tlist(List *tlist)
 	return result_tlist;
 }
 
-/* Add proxy PartitionFilter nodes to subplans of ModifyTable node */
-void
-add_partition_filters(List *rtable, ModifyTable *modify_table)
+/*
+ * Add partition filters to ModifyTable node's children
+ *
+ * 'context' should point to the PlannedStmt->rtable
+ */
+static void
+partition_filter_visitor(Plan *plan, void *context)
 {
-	ListCell *lc1,
-			 *lc2;
+	List		   *rtable = (List *) context;
+	ModifyTable	   *modify_table = (ModifyTable *) plan;
+	ListCell	   *lc1,
+				   *lc2;
 
-	Assert(IsA(modify_table, ModifyTable));
+	Assert(rtable && IsA(rtable, List));
 
-	if (!pg_pathman_enable_partition_filter)
+	/* Skip if not ModifyTable with 'INSERT' command */
+	if (!IsA(modify_table, ModifyTable) || modify_table->operation != CMD_INSERT)
 		return;
 
 	forboth (lc1, modify_table->plans, lc2, modify_table->resultRelations)
@@ -283,9 +351,20 @@ add_partition_filters(List *rtable, ModifyTable *modify_table)
 		Oid					relid = getrelid(rindex, rtable);
 		PartRelationInfo   *prel = get_pathman_relation_info(relid, NULL);
 
+		/* Check that table is partitioned */
 		if (prel)
-			lfirst(lc1) = make_partition_filter_plan((Plan *) lfirst(lc1),
-													 relid,
-													 modify_table->onConflictAction);
+			lfirst(lc1) = make_partition_filter((Plan *) lfirst(lc1),
+												relid,
+												modify_table->onConflictAction);
 	}
+}
+
+/*
+ * Add PartitionFilter nodes to the plan tree
+ */
+void
+add_partition_filters(List *rtable, Plan *plan)
+{
+	if (pg_pathman_enable_partition_filter)
+		plan_tree_walker(plan, partition_filter_visitor, rtable);
 }

@@ -14,21 +14,46 @@
 #include "utils/rel.h"
 #include "nodes/relation.h"
 #include "nodes/nodeFuncs.h"
+#include "pathman.h"
+
 
 typedef struct
 {
-	RelOptInfo *child;
-	RelOptInfo *parent;
-	int			sublevels_up;
-} ReplaceVarsContext;
+	Oid		old_varno;
+	Oid		new_varno;
+} change_varno_context;
+
 
 bool clause_contains_params(Node *clause);
 
-List * build_index_tlist(PlannerInfo *root, IndexOptInfo *index,
+List * build_index_tlist(PlannerInfo *root,
+						 IndexOptInfo *index,
 						 Relation heapRelation);
 
 bool check_rinfo_for_partitioned_attr(List *rinfo,
 									  Index varno,
 									  AttrNumber varattno);
+
+TriggerDesc * append_trigger_descs(TriggerDesc *src,
+								   TriggerDesc *more,
+								   bool *grown_up);
+
+void fill_type_cmp_fmgr_info(FmgrInfo *finfo,
+							 Oid type1,
+							 Oid type2);
+
+List * list_reverse(List *l);
+
+void change_varnos(Node *node, Oid old_varno, Oid new_varno);
+
+Oid str_to_oid(const char *cstr);
+
+void plan_tree_walker(Plan *plan,
+					  void (*visitor) (Plan *plan, void *context),
+					  void *context);
+
+void rowmark_add_tableoids(Query *parse);
+
+void postprocess_lock_rows(List *rtable, Plan *plan);
 
 #endif

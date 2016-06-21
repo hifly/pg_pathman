@@ -119,18 +119,11 @@ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION @extschema@.disable_partitioning(IN relation TEXT)
 RETURNS VOID AS
 $$
-DECLARE
-	parttype INTEGER;
 BEGIN
 	relation := @extschema@.validate_relname(relation);
-	parttype := parttype FROM pathman_config WHERE relname = relation;
 
 	DELETE FROM @extschema@.pathman_config WHERE relname = relation;
-	IF parttype = 1 THEN
-		PERFORM @extschema@.drop_hash_triggers(relation);
-	ELSIF parttype = 2 THEN
-		PERFORM @extschema@.drop_range_triggers(relation);
-	END IF;
+	PERFORM @extschema@.drop_triggers(relation);
 
 	/* Notify backend about changes */
 	PERFORM on_remove_partitions(relation::regclass::integer);
@@ -340,3 +333,87 @@ RETURNS VOID AS 'pg_pathman', 'acquire_partitions_lock' LANGUAGE C STRICT;
  */
 CREATE OR REPLACE FUNCTION @extschema@.release_partitions_lock()
 RETURNS VOID AS 'pg_pathman', 'release_partitions_lock' LANGUAGE C STRICT;
+
+/*
+ * Drop trigger
+ */
+CREATE OR REPLACE FUNCTION @extschema@.drop_triggers(IN relation REGCLASS)
+RETURNS VOID AS
+$$
+DECLARE
+	relname		TEXT;
+	schema		TEXT;
+	funcname	TEXT;
+BEGIN
+	SELECT * INTO schema, relname
+	FROM @extschema@.get_plain_schema_and_relname(relation);
+
+	funcname := schema || '.' || quote_ident(format('%s_update_trigger_func', relname));
+	EXECUTE format('DROP FUNCTION IF EXISTS %s() CASCADE', funcname);
+END
+$$ LANGUAGE plpgsql;
+
+/*
+ * Drop partitions
+ * If delete_data set to TRUE then partitions will be dropped with all the data
+ */
+CREATE OR REPLACE FUNCTION @extschema@.drop_partitions(
+	relation REGCLASS
+	, delete_data BOOLEAN DEFAULT FALSE)
+RETURNS INTEGER AS
+$$
+DECLARE
+	v_rec        RECORD;
+	v_rows       INTEGER;
+	v_part_count INTEGER := 0;
+	v_relname    TEXT;
+	conf_num_del INTEGER;
+BEGIN
+	v_relname := @extschema@.validate_relname(relation);
+
+	/* Drop trigger first */
+	PERFORM @extschema@.drop_triggers(relation);
+
+	WITH config_num_deleted AS (DELETE FROM @extschema@.pathman_config
+								WHERE relname::regclass = relation
+								RETURNING *)
+	SELECT count(*) from config_num_deleted INTO conf_num_del;
+
+	IF conf_num_del = 0 THEN
+		RAISE EXCEPTION 'table % has no partitions', relation::text;
+	END IF;
+
+	FOR v_rec IN (SELECT inhrelid::regclass::text AS tbl
+				  FROM pg_inherits WHERE inhparent::regclass = relation)
+	LOOP
+		IF NOT delete_data THEN
+			EXECUTE format('WITH part_data AS (DELETE FROM %s RETURNING *)
+							INSERT INTO %s SELECT * FROM part_data'
+						   , v_rec.tbl
+						   , relation::text);
+			GET DIAGNOSTICS v_rows = ROW_COUNT;
+			RAISE NOTICE '% rows copied from %', v_rows, v_rec.tbl;
+		END IF;
+		EXECUTE format('DROP TABLE %s', v_rec.tbl);
+		v_part_count := v_part_count + 1;
+	END LOOP;
+
+	/* Notify backend about changes */
+	PERFORM @extschema@.on_remove_partitions(relation::oid);
+
+	RETURN v_part_count;
+END
+$$ LANGUAGE plpgsql
+SET pg_pathman.enable_partitionfilter = off;
+
+/*
+ * Returns hash function OID for specified type
+ */
+CREATE OR REPLACE FUNCTION @extschema@.get_type_hash_func(OID)
+RETURNS OID AS 'pg_pathman', 'get_type_hash_func' LANGUAGE C STRICT;
+
+/*
+ * Calculates hash for integer value
+ */
+CREATE OR REPLACE FUNCTION @extschema@.get_hash(INTEGER, INTEGER)
+RETURNS INTEGER AS 'pg_pathman', 'get_hash' LANGUAGE C STRICT;

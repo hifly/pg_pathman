@@ -12,9 +12,7 @@
 
 #include "pathman.h"
 
-#include "optimizer/clauses.h"
 #include "optimizer/cost.h"
-#include "optimizer/restrictinfo.h"
 #include "optimizer/planmain.h"
 #include "optimizer/tlist.h"
 #include "optimizer/var.h"
@@ -441,7 +439,8 @@ runtimemergeappend_rescan(CustomScanState *node)
 	 * initialize sort-key information
 	 */
 	scan_state->ms_nkeys = scan_state->numCols;
-	scan_state->ms_sortkeys = palloc0(sizeof(SortSupportData) * scan_state->numCols);
+	scan_state->ms_sortkeys = (SortSupport)
+			palloc0(sizeof(SortSupportData) * scan_state->numCols);
 
 	for (i = 0; i < scan_state->numCols; i++)
 	{

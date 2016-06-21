@@ -96,7 +96,6 @@ BEGIN
 	END LOOP;
 
 	/* Create triggers */
-	PERFORM @extschema@.create_range_insert_trigger(v_relname, p_attribute);
 	-- PERFORM create_hash_update_trigger(relation, attribute, partitions_count);
 	/* Notify backend about changes */
 	PERFORM @extschema@.on_create_partitions(p_relation::oid);
@@ -186,7 +185,6 @@ BEGIN
 	END LOOP;
 
 	/* Create triggers */
-	PERFORM @extschema@.create_range_insert_trigger(p_relation, p_attribute);
 	-- PERFORM create_hash_update_trigger(relation, attribute, partitions_count);
 	/* Notify backend about changes */
 	PERFORM @extschema@.on_create_partitions(p_relation::regclass::oid);
@@ -251,7 +249,6 @@ BEGIN
 	END LOOP;
 
 	/* Create triggers */
-	PERFORM @extschema@.create_range_insert_trigger(p_relation, p_attribute);
 
 	/* Notify backend about changes */
 	PERFORM @extschema@.on_create_partitions(p_relation::regclass::oid);
@@ -310,9 +307,6 @@ BEGIN
 		i := i + 1;
 	END LOOP;
 
-	/* Create triggers */
-	PERFORM @extschema@.create_range_insert_trigger(p_relation, p_attribute);
-
 	/* Notify backend about changes */
 	PERFORM @extschema@.on_create_partitions(p_relation::regclass::oid);
 
@@ -328,7 +322,7 @@ END
 $$ LANGUAGE plpgsql;
 
 /*
- * 
+ *
  */
 CREATE OR REPLACE FUNCTION @extschema@.check_boundaries(
 	p_relation REGCLASS
@@ -699,14 +693,14 @@ DECLARE
 	v_part_name TEXT;
 	v_interval TEXT;
 BEGIN
+	/* Prevent concurrent partition creation */
+	PERFORM @extschema@.acquire_partitions_lock();
+
 	SELECT attname, range_interval INTO v_attname, v_interval
 	FROM @extschema@.pathman_config WHERE relname::regclass = p_relation;
 
 	v_atttype := @extschema@.get_attribute_type_name(p_relation, v_attname);
 
-	/* Prevent concurrent partition creation */
-	PERFORM @extschema@.acquire_partitions_lock();
-	
 	EXECUTE format('SELECT @extschema@.append_partition_internal($1, $2, $3, ARRAY[]::%s[])', v_atttype)
 	INTO v_part_name
 	USING p_relation, v_atttype, v_interval;
@@ -721,7 +715,6 @@ BEGIN
 	RETURN v_part_name;
 
 EXCEPTION WHEN others THEN
-	PERFORM @extschema@.release_partitions_lock();
 	RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
 END
 $$
@@ -768,12 +761,12 @@ DECLARE
 	v_part_name TEXT;
 	v_interval TEXT;
 BEGIN
+	/* Prevent concurrent partition creation */
+	PERFORM @extschema@.acquire_partitions_lock();
+
 	SELECT attname, range_interval INTO v_attname, v_interval
 	FROM @extschema@.pathman_config WHERE relname::regclass = p_relation;
 	v_atttype := @extschema@.get_attribute_type_name(p_relation, v_attname);
-
-	/* Prevent concurrent partition creation */
-	PERFORM @extschema@.acquire_partitions_lock();
 
 	EXECUTE format('SELECT @extschema@.prepend_partition_internal($1, $2, $3, ARRAY[]::%s[])', v_atttype)
 	INTO v_part_name
@@ -789,7 +782,6 @@ BEGIN
 	RETURN v_part_name;
 
 EXCEPTION WHEN others THEN
-	PERFORM @extschema@.release_partitions_lock();
 	RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
 END
 $$
@@ -861,7 +853,6 @@ BEGIN
 
 EXCEPTION WHEN others THEN
 	RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
-	PERFORM @extschema@.release_partitions_lock();
 END
 $$
 LANGUAGE plpgsql;
@@ -901,7 +892,6 @@ BEGIN
 
 EXCEPTION WHEN others THEN
 	RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
-	PERFORM @extschema@.release_partitions_lock();
 END
 $$
 LANGUAGE plpgsql;
@@ -922,7 +912,15 @@ DECLARE
 	v_cond           TEXT;
 	v_plain_partname TEXT;
 	v_plain_schema   TEXT;
+	rel_persistence  CHAR;
 BEGIN
+	/* Ignore temporary tables */
+	SELECT relpersistence FROM pg_catalog.pg_class WHERE oid = p_partition INTO rel_persistence;
+	IF rel_persistence = 't'::CHAR THEN
+		RAISE EXCEPTION 'Temporary table % cannot be used as a partition',
+			quote_ident(p_partition::TEXT);
+	END IF;
+
 	/* Prevent concurrent partition management */
 	PERFORM @extschema@.acquire_partitions_lock();
 
@@ -962,7 +960,6 @@ BEGIN
 
 EXCEPTION WHEN others THEN
 	RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
-	PERFORM @extschema@.release_partitions_lock();
 END
 $$
 LANGUAGE plpgsql;
@@ -1004,66 +1001,9 @@ BEGIN
 
 EXCEPTION WHEN others THEN
 	RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
-	PERFORM @extschema@.release_partitions_lock();
 END
 $$
 LANGUAGE plpgsql;
-
-
-/*
- * Creates range partitioning insert trigger
- */
-CREATE OR REPLACE FUNCTION @extschema@.create_range_insert_trigger(
-	v_relation    REGCLASS
-	, v_attname   TEXT)
-RETURNS VOID AS
-$$
-DECLARE
-	v_func TEXT := '
-		CREATE OR REPLACE FUNCTION %s()
-		RETURNS TRIGGER
-		AS $body$
-		DECLARE
-			v_part_relid OID;
-		BEGIN
-			IF TG_OP = ''INSERT'' THEN
-				IF NEW.%2$s IS NULL THEN
-					RAISE EXCEPTION ''ERROR: NULL value in partitioning key'';
-				END IF;
-				v_part_relid := @extschema@.find_or_create_range_partition(TG_RELID, NEW.%2$s);
-				IF NOT v_part_relid IS NULL THEN
-					EXECUTE format(''INSERT INTO %%s SELECT $1.*'', v_part_relid::regclass)
-					USING NEW;
-				ELSE
-					RAISE EXCEPTION ''ERROR: Cannot find partition'';
-				END IF;
-			END IF;
-			RETURN NULL;
-		END
-		$body$ LANGUAGE plpgsql;';
-	v_funcname TEXT;
-	v_trigger TEXT := '
-		CREATE TRIGGER %s
-		BEFORE INSERT ON %s
-		FOR EACH ROW EXECUTE PROCEDURE %s();';
-	v_triggername   TEXT;
-	v_plain_relname TEXT;
-	v_plain_schema  TEXT;
-BEGIN
-	SELECT * INTO v_plain_schema, v_plain_relname
-	FROM @extschema@.get_plain_schema_and_relname(v_relation);
-
-	v_funcname := format(quote_ident('%s_insert_trigger_func'), v_plain_relname);
-	v_triggername := format('"%s_%s_insert_trigger"', v_plain_schema, v_plain_relname);
-
-	v_func := format(v_func, v_funcname, v_attname);
-	v_trigger := format(v_trigger, v_triggername, v_relation, v_funcname);
-
-	EXECUTE v_func;
-	EXECUTE v_trigger;
-	RETURN;
-END
-$$ LANGUAGE plpgsql;
 
 
 /*
@@ -1092,7 +1032,7 @@ DECLARE
 			EXECUTE q USING %7$s;
 			RETURN NULL;
 		END $body$ LANGUAGE plpgsql';
-	trigger TEXT := 'CREATE TRIGGER %s_update_trigger ' ||  
+	trigger TEXT := 'CREATE TRIGGER %s_update_trigger ' ||
 		'BEFORE UPDATE ON %s ' ||
 		'FOR EACH ROW EXECUTE PROCEDURE %s_update_trigger_func()';
 	att_names   TEXT;
@@ -1136,72 +1076,6 @@ BEGIN
 	RETURN format('%s_update_trigger_func()', relation);
 END
 $$ LANGUAGE plpgsql;
-
-
-/*
- * Drop partitions
- * If delete_data set to TRUE then partitions will be dropped with all the data
- */
-CREATE OR REPLACE FUNCTION @extschema@.drop_range_partitions(
-	relation REGCLASS
-	, delete_data BOOLEAN DEFAULT FALSE)
-RETURNS INTEGER AS
-$$
-DECLARE
-	v_rec        RECORD;
-	v_rows       INTEGER;
-	v_part_count INTEGER := 0;
-	v_relname    TEXT;
-BEGIN
-	v_relname := @extschema@.validate_relname(relation);
-
-	/* Drop trigger first */
-	PERFORM @extschema@.drop_range_triggers(relation);
-
-	FOR v_rec IN (SELECT inhrelid::regclass::text AS tbl
-				  FROM pg_inherits WHERE inhparent::regclass = relation)
-	LOOP
-		IF NOT delete_data THEN
-			EXECUTE format('WITH part_data AS (DELETE FROM %s RETURNING *)
-							INSERT INTO %s SELECT * FROM part_data'
-						   , v_rec.tbl
-						   , relation::text);
-			GET DIAGNOSTICS v_rows = ROW_COUNT;
-			RAISE NOTICE '% rows copied from %', v_rows, v_rec.tbl;
-		END IF;
-		EXECUTE format('DROP TABLE %s', v_rec.tbl);
-		v_part_count := v_part_count + 1;
-	END LOOP;
-
-	DELETE FROM @extschema@.pathman_config WHERE relname::regclass = relation;
-
-	/* Notify backend about changes */
-	PERFORM @extschema@.on_remove_partitions(relation::oid);
-
-	RETURN v_part_count;
-END
-$$ LANGUAGE plpgsql;
-
-
-/*
- * Drop trigger
- */
-CREATE OR REPLACE FUNCTION @extschema@.drop_range_triggers(IN relation REGCLASS)
-RETURNS VOID AS
-$$
-DECLARE
-	schema  TEXT;
-	relname TEXT;
-BEGIN
-	SELECT * INTO schema, relname
-	FROM @extschema@.get_plain_schema_and_relname(relation);
-
-	EXECUTE format('DROP TRIGGER IF EXISTS %s ON %s CASCADE'
-				   , format('"%s_%s_insert_trigger"', schema, relname)
-				   , relation::TEXT);
-END
-$$ LANGUAGE plpgsql;
-
 
 /*
  * Internal function used to create new partitions on insert or update trigger.
@@ -1277,7 +1151,7 @@ BEGIN
 			RAISE NOTICE 'partition % created', v_part;
 		END LOOP;
 	ELSE
-		RAISE NOTICE 'Not implemented yet';
+		RAISE EXCEPTION 'Could not create partition';
 	END IF;
 
 	IF i > 0 THEN

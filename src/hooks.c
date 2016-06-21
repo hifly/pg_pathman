@@ -10,17 +10,20 @@
 #include "postgres.h"
 #include "optimizer/cost.h"
 #include "optimizer/restrictinfo.h"
-#include "utils/guc.h"
-#include "hooks.h"
 #include "pathman.h"
+#include "hooks.h"
+#include "partition_filter.h"
 #include "runtimeappend.h"
 #include "runtime_merge_append.h"
-#include "partition_filter.h"
 #include "utils.h"
 
 
 set_join_pathlist_hook_type		set_join_pathlist_next = NULL;
 set_rel_pathlist_hook_type		set_rel_pathlist_hook_next = NULL;
+planner_hook_type				planner_hook_next = NULL;
+post_parse_analyze_hook_type	post_parse_analyze_hook_next = NULL;
+shmem_startup_hook_type			shmem_startup_hook_next = NULL;
+
 
 /* Take care of joins */
 void
@@ -162,7 +165,8 @@ pathman_rel_pathlist_hook(PlannerInfo *root, RelOptInfo *rel, Index rti, RangeTb
 		return;
 
 	/* This works only for SELECT queries (at least for now) */
-	if (root->parse->commandType != CMD_SELECT || !inheritance_disabled)
+	if (root->parse->commandType != CMD_SELECT ||
+		!list_member_oid(inheritance_enabled_relids, rte->relid))
 		return;
 
 	/* Lookup partitioning information for parent relation */
@@ -215,14 +219,11 @@ pathman_rel_pathlist_hook(PlannerInfo *root, RelOptInfo *rel, Index rti, RangeTb
 		}
 
 		rte->inh = true;
-		dsm_arr = (Oid *) dsm_array_get_pointer(&prel->children);
-		ranges = list_make1_int(make_irange(0, prel->children_count - 1, false));
+		dsm_arr = (Oid *) dsm_array_get_pointer(&prel->children, true);
+		ranges = list_make1_irange(make_irange(0, prel->children_count - 1, false));
 
 		/* Make wrappers over restrictions and collect final rangeset */
-		context.prel = prel;
-		context.econtext = NULL;
-		context.hasLeast = false;
-		context.hasGreatest = false;
+		InitWalkerContext(&context, prel, NULL);
 		wrappers = NIL;
 		foreach(lc, rel->baserestrictinfo)
 		{
@@ -255,11 +256,11 @@ pathman_rel_pathlist_hook(PlannerInfo *root, RelOptInfo *rel, Index rti, RangeTb
 				palloc0((root->simple_rel_array_size + len) * sizeof(RangeTblEntry *));
 
 			/* Copy relations to the new arrays */
-	        for (i = 0; i < root->simple_rel_array_size; i++)
-	        {
-	                new_rel_array[i] = root->simple_rel_array[i];
-	                new_rte_array[i] = root->simple_rte_array[i];
-	        }
+			for (i = 0; i < root->simple_rel_array_size; i++)
+			{
+				new_rel_array[i] = root->simple_rel_array[i];
+				new_rte_array[i] = root->simple_rte_array[i];
+			}
 
 			/* Free old arrays */
 			pfree(root->simple_rel_array);
@@ -278,7 +279,7 @@ pathman_rel_pathlist_hook(PlannerInfo *root, RelOptInfo *rel, Index rti, RangeTb
 		{
 			IndexRange	irange = lfirst_irange(lc);
 
-			for (i = irange_lower(irange); i <= irange_upper(irange); i++)
+			for (i = irange.ir_lower; i <= irange.ir_upper; i++)
 				append_child_relation(root, rel, rti, rte, i, dsm_arr[i], wrappers);
 		}
 
@@ -360,3 +361,99 @@ void pg_pathman_enable_assign_hook(bool newval, void *extra)
 		 newval ? "enabled" : "disabled");
 }
 
+/*
+ * Planner hook. It disables inheritance for tables that have been partitioned
+ * by pathman to prevent standart PostgreSQL partitioning mechanism from
+ * handling that tables.
+ */
+PlannedStmt *
+pathman_planner_hook(Query *parse, int cursorOptions, ParamListInfo boundParams)
+{
+	PlannedStmt	  *result;
+
+	if (pg_pathman_enable)
+	{
+		switch(parse->commandType)
+		{
+			case CMD_SELECT:
+				disable_inheritance(parse);
+				rowmark_add_tableoids(parse); /* add attributes for rowmarks */
+				break;
+
+			case CMD_UPDATE:
+			case CMD_DELETE:
+				disable_inheritance_cte(parse);
+				disable_inheritance_subselect(parse);
+				handle_modification_query(parse);
+				break;
+
+			case CMD_INSERT:
+			{
+				ListCell *lc;
+
+				result = standard_planner(parse, cursorOptions, boundParams);
+
+				add_partition_filters(result->rtable, result->planTree);
+				foreach (lc, result->subplans)
+					add_partition_filters(result->rtable, (Plan *) lfirst(lc));
+
+				return result;
+			}
+
+			default:
+				break;
+		}
+	}
+
+	/* Invoke original hook */
+	if (planner_hook_next)
+		result = planner_hook_next(parse, cursorOptions, boundParams);
+	else
+		result = standard_planner(parse, cursorOptions, boundParams);
+
+	if (pg_pathman_enable)
+	{
+		ListCell *lc;
+
+		/* Give rowmark-related attributes correct names */
+		postprocess_lock_rows(result->rtable, result->planTree);
+		foreach (lc, result->subplans)
+			postprocess_lock_rows(result->rtable, (Plan *) lfirst(lc));
+	}
+
+	list_free(inheritance_disabled_relids);
+	inheritance_disabled_relids = NIL;
+
+	return result;
+}
+
+/*
+ * Post parse analysis hook. It makes sure the config is loaded before executing
+ * any statement, including utility commands
+ */
+void
+pathman_post_parse_analysis_hook(ParseState *pstate, Query *query)
+{
+	if (initialization_needed)
+		load_config();
+
+	if (post_parse_analyze_hook_next)
+		post_parse_analyze_hook_next(pstate, query);
+
+	inheritance_disabled_relids = NIL;
+	inheritance_enabled_relids = NIL;
+}
+
+void
+pathman_shmem_startup_hook(void)
+{
+	/* Allocate shared memory objects */
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+	init_dsm_config();
+	init_shmem_config();
+	LWLockRelease(AddinShmemInitLock);
+
+	/* Invoke original hook if needed */
+	if (shmem_startup_hook_next != NULL)
+		shmem_startup_hook_next();
+}
