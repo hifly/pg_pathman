@@ -38,6 +38,42 @@ RETURNS VOID AS 'pg_pathman', 'on_partitions_removed' LANGUAGE C STRICT;
 CREATE OR REPLACE FUNCTION @extschema@.find_or_create_range_partition(relid OID, value ANYELEMENT)
 RETURNS OID AS 'pg_pathman', 'find_or_create_range_partition' LANGUAGE C STRICT;
 
+/* PathmanRange type */
+CREATE OR REPLACE FUNCTION @extschema@.pathman_range_in(cstring)
+    RETURNS PathmanRange
+    AS 'pg_pathman'
+    LANGUAGE C IMMUTABLE STRICT;
+
+CREATE OR REPLACE FUNCTION @extschema@.pathman_range_out(PathmanRange)
+    RETURNS cstring
+    AS 'pg_pathman'
+    LANGUAGE C IMMUTABLE STRICT;
+
+CREATE OR REPLACE FUNCTION @extschema@.get_range(relid OID)
+    RETURNS PathmanRange
+    AS 'pg_pathman'
+    LANGUAGE C STRICT;
+
+CREATE OR REPLACE FUNCTION @extschema@.range_value_cmp(range PathmanRange, value ANYELEMENT)
+	RETURNS INTEGER
+	AS 'pg_pathman'
+	LANGUAGE C STRICT;
+
+CREATE OR REPLACE FUNCTION @extschema@.range_lower(range PathmanRange, dummy ANYELEMENT)
+	RETURNS ANYELEMENT
+	AS 'pg_pathman'
+	LANGUAGE C STRICT;
+
+CREATE OR REPLACE FUNCTION @extschema@.range_upper(range PathmanRange, dummy ANYELEMENT)
+	RETURNS ANYELEMENT
+	AS 'pg_pathman'
+	LANGUAGE C STRICT;
+
+CREATE TYPE @extschema@.PathmanRange (
+	internallength = 32,
+	input = pathman_range_in,
+	output = pathman_range_out
+);
 
 /*
  * Returns min and max values for specified RANGE partition.

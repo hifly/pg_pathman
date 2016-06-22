@@ -13,7 +13,7 @@
 #include "utils/typcache.h"
 #include "utils/array.h"
 #include "utils.h"
-
+#include "funcapi.h"
 
 /* declarations */
 PG_FUNCTION_INFO_V1( on_partitions_created );
@@ -29,6 +29,31 @@ PG_FUNCTION_INFO_V1( get_min_range_value );
 PG_FUNCTION_INFO_V1( get_max_range_value );
 PG_FUNCTION_INFO_V1( get_type_hash_func );
 PG_FUNCTION_INFO_V1( get_hash );
+
+/* pathman_range type */
+typedef struct PathmanRange
+{
+	Oid			type_oid;
+	bool		by_val;
+	RangeEntry	range;
+} PathmanRange;
+
+typedef struct PathmanRangeListCtxt
+{
+	Oid			type_oid;
+	bool		by_val;
+	RangeEntry *ranges;
+	int			nranges;
+	int			pos;
+} PathmanRangeListCtxt;
+
+PG_FUNCTION_INFO_V1( pathman_range_in );
+PG_FUNCTION_INFO_V1( pathman_range_out );
+PG_FUNCTION_INFO_V1( get_range );
+PG_FUNCTION_INFO_V1( range_lower );
+PG_FUNCTION_INFO_V1( range_upper );
+PG_FUNCTION_INFO_V1( range_list );
+PG_FUNCTION_INFO_V1( range_value_cmp );
 
 /*
  * Callbacks
@@ -135,7 +160,8 @@ find_or_create_range_partition(PG_FUNCTION_ARGS)
 		}
 
 		/* Start background worker to create new partitions */
-		child_oid = create_partitions_bg_worker(relid, value, value_type);
+		// child_oid = create_partitions_bg_worker(relid, value, value_type);
+		child_oid = create_partitions(relid, value, value_type, NULL);
 
 		PG_RETURN_OID(child_oid);
 	}
@@ -365,6 +391,171 @@ get_type_hash_func(PG_FUNCTION_ARGS)
 	tce = lookup_type_cache(type_oid, TYPECACHE_HASH_PROC);
 
 	PG_RETURN_OID(tce->hash_proc);
+}
+
+Datum
+pathman_range_in(PG_FUNCTION_ARGS)
+{
+	elog(ERROR, "Not implemented");
+}
+
+Datum
+pathman_range_out(PG_FUNCTION_ARGS)
+{
+	PathmanRange *rng = (PathmanRange *) PG_GETARG_POINTER(0);
+	char	   *result;
+	char	   *left,
+			   *right;
+	Oid outputfunc;
+	bool typisvarlena;
+
+	// elog(NOTICE, "pathman_range_out");
+	// fclose(fopen("/tmp/123.txt", "w"));
+
+	getTypeOutputInfo(rng->type_oid, &outputfunc, &typisvarlena);
+	left = OidOutputFunctionCall(outputfunc, PATHMAN_GET_DATUM(rng->range.min, rng->by_val));
+	right = OidOutputFunctionCall(outputfunc, PATHMAN_GET_DATUM(rng->range.max, rng->by_val));
+
+	result = psprintf("[%s: %s)", left, right);
+	PG_RETURN_CSTRING(result);
+}
+
+Datum
+get_range(PG_FUNCTION_ARGS)
+{
+	int parent_oid = DatumGetInt32(PG_GETARG_DATUM(0));
+	PartRelationInfo *prel;
+	RangeRelation	*rangerel;
+	RangeEntry		*ranges;
+	PathmanRange *pl_range;
+
+	prel = get_pathman_relation_info(parent_oid, NULL);
+	rangerel = get_pathman_range_relation(parent_oid, NULL);
+
+	if (!prel || !rangerel || prel->parttype != PT_RANGE || rangerel->ranges.elem_count == 0)
+		PG_RETURN_NULL();
+
+	ranges = dsm_array_get_pointer(&rangerel->ranges, true);
+
+	/* Create range entry object */
+	pl_range = palloc(sizeof(PathmanRange));
+	pl_range->type_oid = prel->atttype;
+	pl_range->by_val = rangerel->by_val;
+	pl_range->range.child_oid = 0;
+	pl_range->range.min = ranges[0].min;
+	pl_range->range.max = ranges[rangerel->ranges.elem_count-1].max;
+
+	PG_RETURN_POINTER(pl_range);
+}
+
+Datum
+range_value_cmp(PG_FUNCTION_ARGS)
+{
+	TypeCacheEntry *tce;
+	PathmanRange   *rng = (PathmanRange *) PG_GETARG_POINTER(0);
+	Datum		value = PG_GETARG_DATUM(1);
+	Oid			value_type = get_fn_expr_argtype(fcinfo->flinfo, 1);
+	Oid			cmp_proc_oid;
+	FmgrInfo	cmp_func;
+	int 		lower_cmp,
+				upper_cmp;
+
+	tce = lookup_type_cache(value_type, TYPECACHE_BTREE_OPFAMILY);
+
+	cmp_proc_oid = get_opfamily_proc(tce->btree_opf,
+									 value_type,
+									 rng->type_oid,
+									 BTORDER_PROC);
+	fmgr_info(cmp_proc_oid, &cmp_func);
+
+	/* check lower bound */
+	lower_cmp = FunctionCall2(&cmp_func, value, PATHMAN_GET_DATUM(rng->range.min, rng->by_val));
+	if (DatumGetInt32(lower_cmp) < 0)
+		PG_RETURN_INT32(-1);
+
+	/* check upper bound */
+	upper_cmp = FunctionCall2(&cmp_func, value, PATHMAN_GET_DATUM(rng->range.max, rng->by_val));
+	if (DatumGetInt32(upper_cmp) >= 0)
+		PG_RETURN_INT32(1);
+
+	PG_RETURN_INT32(0);
+}
+
+Datum
+range_lower(PG_FUNCTION_ARGS)
+{
+	PathmanRange   *rng = (PathmanRange *) PG_GETARG_POINTER(0);
+
+	PG_RETURN_DATUM(PATHMAN_GET_DATUM(rng->range.min, rng->by_val));
+}
+
+Datum
+range_upper(PG_FUNCTION_ARGS)
+{
+	PathmanRange   *rng = (PathmanRange *) PG_GETARG_POINTER(0);
+
+	PG_RETURN_DATUM(PATHMAN_GET_DATUM(rng->range.max, rng->by_val));
+}
+
+/*
+ * Returns set of table partitions
+ */
+Datum
+range_list(PG_FUNCTION_ARGS)
+{
+	int			parent_oid = DatumGetInt32(PG_GETARG_DATUM(0));
+	// Datum		result;
+	FuncCallContext    *funcctx;
+	MemoryContext		oldcontext;
+	PathmanRangeListCtxt *fctx;
+	PartRelationInfo   *prel;
+	RangeRelation	   *rangerel;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		funcctx = SRF_FIRSTCALL_INIT();
+	
+		prel = get_pathman_relation_info(parent_oid, NULL);
+		rangerel = get_pathman_range_relation(parent_oid, NULL);
+		if (!prel || !rangerel || prel->parttype != PT_RANGE || rangerel->ranges.elem_count == 0)
+			SRF_RETURN_DONE(funcctx);
+
+		// switch context when allocating stuff to be used in later calls
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		fctx = (PathmanRangeListCtxt *) palloc(sizeof(PathmanRangeListCtxt));
+		fctx->pos = 0;
+		fctx->ranges = dsm_array_get_pointer(&rangerel->ranges, true);
+		fctx->by_val = rangerel->by_val;
+		fctx->nranges = prel->children_count;
+		fctx->type_oid = prel->atttype;
+
+		// return to original context when allocating transient memory
+		MemoryContextSwitchTo(oldcontext);
+
+		funcctx->user_fctx = fctx;
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+	fctx = funcctx->user_fctx;
+	if (fctx->pos < fctx->nranges)
+	{
+		int pos;
+		PathmanRange *rng = (PathmanRange *) palloc(sizeof(PathmanRange));
+
+		pos = fctx->pos;
+		fctx->pos++;
+
+		rng->type_oid = fctx->type_oid;
+		rng->by_val = fctx->by_val;
+		// rng->min = fctx->ranges[pos].min;
+		// rng->max = fctx->ranges[pos].max;
+		rng->range = fctx->ranges[pos];
+
+		SRF_RETURN_NEXT(funcctx, PointerGetDatum(rng));
+	}
+	else
+		SRF_RETURN_DONE(funcctx);
 }
 
 Datum

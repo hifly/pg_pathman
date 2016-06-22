@@ -1098,6 +1098,7 @@ DECLARE
 	v_cur_value p_new_value%TYPE;
 	v_next_value p_new_value%TYPE;
 	v_is_date BOOLEAN;
+	v_rng @extschema@.PATHMANRANGE;
 BEGIN
 	v_relation := @extschema@.validate_relname(p_relid::regclass::text);
 
@@ -1105,8 +1106,15 @@ BEGIN
 	SELECT attname, range_interval INTO v_attname, v_interval
 	FROM @extschema@.pathman_config WHERE relname = v_relation;
 
-	v_min := @extschema@.get_min_range_value(p_relid::regclass::oid, p_new_value);
-	v_max := @extschema@.get_max_range_value(p_relid::regclass::oid, p_new_value);
+
+	v_rng := @extschema@.get_range(p_relid);
+	v_min := @extschema@.range_lower(v_rng, p_new_value);
+	v_max := @extschema@.range_upper(v_rng, p_new_value);
+	-- RAISE NOTICE '1. v_min: %, v_max: %', v_min, v_max;
+
+	-- v_min := @extschema@.get_min_range_value(p_relid::regclass::oid, p_new_value);
+	-- v_max := @extschema@.get_max_range_value(p_relid::regclass::oid, p_new_value);
+	-- RAISE NOTICE '2. v_min: %, v_max: %', v_min, v_max;
 
 	v_is_date := @extschema@.is_date(pg_typeof(p_new_value)::regtype);
 
