@@ -867,7 +867,7 @@ NOTICE:  Altering original partition...
 NOTICE:  Done!
  split_range_partition 
 -----------------------
- {0,1000}
+ test.num_range_rel_5
 (1 row)
 
 EXPLAIN (COSTS OFF) SELECT * FROM test.num_range_rel WHERE id BETWEEN 100 AND 700;
@@ -885,9 +885,9 @@ NOTICE:  Creating new partition...
 NOTICE:  Copying data to new partition...
 NOTICE:  Altering original partition...
 NOTICE:  Done!
-  split_range_partition  
--------------------------
- {01-01-2015,02-01-2015}
+ split_range_partition 
+-----------------------
+ test.range_rel_5
 (1 row)
 
 /* Merge two partitions into one */
@@ -1347,9 +1347,9 @@ NOTICE:  Creating new partition...
 NOTICE:  Copying data to new partition...
 NOTICE:  Altering original partition...
 NOTICE:  Done!
-  split_range_partition  
--------------------------
- {12-31-2014,01-02-2015}
+ split_range_partition 
+-----------------------
+ test."RangeRel_6"
 (1 row)
 
 SELECT pathman.drop_partitions('test."RangeRel"');
@@ -1465,9 +1465,9 @@ NOTICE:  Creating new partition...
 NOTICE:  Copying data to new partition...
 NOTICE:  Altering original partition...
 NOTICE:  Done!
-  split_range_partition  
--------------------------
- {01-01-2010,03-01-2010}
+ split_range_partition 
+-----------------------
+ range_rel_13
 (1 row)
 
 SELECT append_range_partition('range_rel');

@@ -466,9 +466,8 @@ $$ LANGUAGE plpgsql;
  */
 CREATE OR REPLACE FUNCTION @extschema@.split_range_partition(
 	p_partition REGCLASS
-	, p_value ANYELEMENT
-	, OUT p_range ANYARRAY)
-RETURNS ANYARRAY AS
+	, p_value ANYELEMENT)
+RETURNS REGCLASS AS
 $$
 DECLARE
 	v_parent_relid  OID;
@@ -481,6 +480,7 @@ DECLARE
 	v_plain_schema  TEXT;
 	v_plain_relname TEXT;
 	v_check_name    TEXT;
+	v_rng           @extschema@.PATHMANRANGE;
 BEGIN
 	v_part_relname := @extschema@.validate_relname(p_partition);
 
@@ -501,16 +501,14 @@ BEGIN
 	END IF;
 
 	/* Get partition values range */
-	p_range := @extschema@.get_partition_range(v_parent_relid, v_child_relid, 0);
-	IF p_range IS NULL THEN
+	v_rng := @extschema@.get_range_partition_by_oid(v_parent_relid, v_child_relid);
+	IF v_rng IS NULL THEN
 		RAISE EXCEPTION 'Could not find specified partition';
 	END IF;
 
 	/* Check if value fit into the range */
-	IF p_range[1] > p_value OR p_range[2] <= p_value
-	THEN
-		RAISE EXCEPTION 'Specified value does not fit into the range [%, %)',
-			p_range[1], p_range[2];
+	IF @extschema@.range_value_cmp(v_rng, p_value) != 0	THEN
+		RAISE EXCEPTION 'Specified value does not fit into the range %', v_rng;
 	END IF;
 
 	/* Create new partition */
@@ -518,11 +516,11 @@ BEGIN
 	v_new_partition := @extschema@.create_single_range_partition(
 							@extschema@.get_schema_qualified_name(v_parent_relid::regclass, '.'),
 							p_value,
-							p_range[2]);
+							@extschema@.range_upper(v_rng, p_value));
 
 	/* Copy data */
 	RAISE NOTICE 'Copying data to new partition...';
-	v_cond := @extschema@.get_range_condition(v_attname, p_value, p_range[2]);
+	v_cond := @extschema@.get_range_condition(v_attname, p_value, @extschema@.range_upper(v_rng, p_value));
 	EXECUTE format('
 				WITH part_data AS (
 					DELETE FROM %s WHERE %s RETURNING *)
@@ -533,7 +531,7 @@ BEGIN
 
 	/* Alter original partition */
 	RAISE NOTICE 'Altering original partition...';
-	v_cond := @extschema@.get_range_condition(v_attname, p_range[1], p_value);
+	v_cond := @extschema@.get_range_condition(v_attname, @extschema@.range_lower(v_rng, p_value), p_value);
 	v_check_name := quote_ident(format('%s_%s_check', v_plain_schema, v_plain_relname));
 	EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %s'
 				   , p_partition::text
@@ -547,6 +545,8 @@ BEGIN
 	PERFORM @extschema@.on_update_partitions(v_parent_relid::oid);
 
 	RAISE NOTICE 'Done!';
+
+	RETURN v_new_partition::regclass;
 END
 $$
 LANGUAGE plpgsql;
@@ -619,9 +619,8 @@ CREATE OR REPLACE FUNCTION @extschema@.merge_range_partitions_internal(
 	p_parent_relid OID
 	, p_part1 REGCLASS
 	, p_part2 REGCLASS
-	, dummy ANYELEMENT
-	, OUT p_range ANYARRAY)
-RETURNS ANYARRAY AS
+	, dummy ANYELEMENT)
+RETURNS REGCLASS AS
 $$
 DECLARE
 	v_attname       TEXT;
@@ -630,6 +629,8 @@ DECLARE
 	v_plain_relname TEXT;
 	v_child_relname TEXT;
 	v_check_name    TEXT;
+	v_rng1			@extschema@.PATHMANRANGE;
+	v_rng2			@extschema@.PATHMANRANGE;
 BEGIN
 	SELECT attname INTO v_attname FROM @extschema@.pathman_config
 	WHERE relname::regclass = p_parent_relid::regclass;
@@ -642,18 +643,19 @@ BEGIN
 	 * first and second elements of array are MIN and MAX of partition1
 	 * third and forth elements are MIN and MAX of partition2
 	 */
-	p_range := @extschema@.get_partition_range(p_parent_relid, p_part1::oid, 0) ||
-			   @extschema@.get_partition_range(p_parent_relid, p_part2::oid, 0);
+	v_rng1 := @extschema@.get_range_partition_by_oid(p_parent_relid, p_part1::oid);
+	v_rng2 := @extschema@.get_range_partition_by_oid(p_parent_relid, p_part2::oid);
 
 	/* Check if ranges are adjacent */
-	IF p_range[1] != p_range[4] AND p_range[2] != p_range[3] THEN
+	IF @extschema@.range_lower(v_rng1, dummy) != @extschema@.range_upper(v_rng2, dummy) AND
+	   @extschema@.range_lower(v_rng2, dummy) != @extschema@.range_upper(v_rng1, dummy) THEN
 		RAISE EXCEPTION 'Merge failed. Partitions must be adjacent';
 	END IF;
 
 	/* Extend first partition */
 	v_cond := @extschema@.get_range_condition(v_attname
-											  , least(p_range[1], p_range[3])
-											  , greatest(p_range[2], p_range[4]));
+											  , least(@extschema@.range_lower(v_rng1, dummy), @extschema@.range_lower(v_rng2, dummy))
+											  , greatest(@extschema@.range_upper(v_rng1, dummy), @extschema@.range_upper(v_rng2, dummy)));
 
 	/* Alter first partition */
 	RAISE NOTICE 'Altering first partition...';
@@ -676,6 +678,8 @@ BEGIN
 	/* Remove second partition */
 	RAISE NOTICE 'Dropping second partition...';
 	EXECUTE format('DROP TABLE %s', p_part2::text);
+
+	RETURN p_part1;
 END
 $$ LANGUAGE plpgsql;
 
@@ -924,8 +928,6 @@ BEGIN
 	/* Prevent concurrent partition management */
 	PERFORM @extschema@.acquire_partitions_lock();
 
-	-- p_relation := @extschema@.validate_relname(p_relation);
-
 	IF @extschema@.check_overlap(p_relation::oid, p_start_value, p_end_value) != FALSE THEN
 		RAISE EXCEPTION 'Specified range overlaps with existing partitions';
 	END IF;
@@ -1107,15 +1109,9 @@ BEGIN
 	FROM @extschema@.pathman_config WHERE relname = v_relation;
 
 
-	v_rng := @extschema@.get_range(p_relid);
+	v_rng := @extschema@.get_whole_range(p_relid);
 	v_min := @extschema@.range_lower(v_rng, p_new_value);
 	v_max := @extschema@.range_upper(v_rng, p_new_value);
-	-- RAISE NOTICE '1. v_min: %, v_max: %', v_min, v_max;
-
-	-- v_min := @extschema@.get_min_range_value(p_relid::regclass::oid, p_new_value);
-	-- v_max := @extschema@.get_max_range_value(p_relid::regclass::oid, p_new_value);
-	-- RAISE NOTICE '2. v_min: %, v_max: %', v_min, v_max;
-
 	v_is_date := @extschema@.is_date(pg_typeof(p_new_value)::regtype);
 
 	IF p_new_value >= v_max THEN

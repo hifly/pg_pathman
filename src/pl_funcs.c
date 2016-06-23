@@ -14,6 +14,9 @@
 #include "utils/array.h"
 #include "utils.h"
 #include "funcapi.h"
+#include "parser/parse_coerce.h"
+
+static Datum cast_datum(Datum src, Oid src_type, Oid target_type);
 
 /* declarations */
 PG_FUNCTION_INFO_V1( on_partitions_created );
@@ -21,12 +24,10 @@ PG_FUNCTION_INFO_V1( on_partitions_updated );
 PG_FUNCTION_INFO_V1( on_partitions_removed );
 PG_FUNCTION_INFO_V1( find_or_create_range_partition);
 PG_FUNCTION_INFO_V1( get_range_by_idx );
-PG_FUNCTION_INFO_V1( get_partition_range );
+PG_FUNCTION_INFO_V1( get_range_partition_by_oid );
 PG_FUNCTION_INFO_V1( acquire_partitions_lock );
 PG_FUNCTION_INFO_V1( release_partitions_lock );
 PG_FUNCTION_INFO_V1( check_overlap );
-PG_FUNCTION_INFO_V1( get_min_range_value );
-PG_FUNCTION_INFO_V1( get_max_range_value );
 PG_FUNCTION_INFO_V1( get_type_hash_func );
 PG_FUNCTION_INFO_V1( get_hash );
 
@@ -37,6 +38,12 @@ typedef struct PathmanRange
 	bool		by_val;
 	RangeEntry	range;
 } PathmanRange;
+
+typedef struct PathmanHash
+{
+	Oid			child_oid;
+	uint32		hash;
+} PathmanHash;
 
 typedef struct PathmanRangeListCtxt
 {
@@ -49,11 +56,31 @@ typedef struct PathmanRangeListCtxt
 
 PG_FUNCTION_INFO_V1( pathman_range_in );
 PG_FUNCTION_INFO_V1( pathman_range_out );
-PG_FUNCTION_INFO_V1( get_range );
+PG_FUNCTION_INFO_V1( get_whole_range );
+PG_FUNCTION_INFO_V1( range_partitions_list );
 PG_FUNCTION_INFO_V1( range_lower );
 PG_FUNCTION_INFO_V1( range_upper );
-PG_FUNCTION_INFO_V1( range_list );
+PG_FUNCTION_INFO_V1( range_oid );
 PG_FUNCTION_INFO_V1( range_value_cmp );
+
+/*
+ * Casts datum to target type
+ */
+static Datum
+cast_datum(Datum src, Oid src_type, Oid target_type)
+{
+	Oid			castfunc;
+				CoercionPathType ctype;
+
+	ctype = find_coercion_pathway(target_type, src_type,
+								  COERCION_EXPLICIT,
+								  &castfunc);
+	if (ctype == COERCION_PATH_FUNC && OidIsValid(castfunc))
+		return OidFunctionCall1(castfunc, src);
+
+	/* TODO !!! */
+	return 0;
+}
 
 /*
  * Callbacks
@@ -160,8 +187,8 @@ find_or_create_range_partition(PG_FUNCTION_ARGS)
 		}
 
 		/* Start background worker to create new partitions */
-		// child_oid = create_partitions_bg_worker(relid, value, value_type);
-		child_oid = create_partitions(relid, value, value_type, NULL);
+		child_oid = create_partitions_bg_worker(relid, value, value_type);
+		// child_oid = create_partitions(relid, value, value_type, NULL);
 
 		PG_RETURN_OID(child_oid);
 	}
@@ -175,19 +202,16 @@ find_or_create_range_partition(PG_FUNCTION_ARGS)
  * third and forth are MIN and MAX output parameters
  */
 Datum
-get_partition_range(PG_FUNCTION_ARGS)
+get_range_partition_by_oid(PG_FUNCTION_ARGS)
 {
 	Oid					parent_oid = DatumGetObjectId(PG_GETARG_DATUM(0));
 	Oid					child_oid = DatumGetObjectId(PG_GETARG_DATUM(1));
-	int					nelems = 2;
 	int					i;
 	bool				found = false;
-	Datum			   *elems;
 	PartRelationInfo   *prel;
 	RangeRelation	   *rangerel;
 	RangeEntry		   *ranges;
 	TypeCacheEntry	   *tce;
-	ArrayType		   *arr;
 
 	prel = get_pathman_relation_info(parent_oid, NULL);
 
@@ -209,15 +233,13 @@ get_partition_range(PG_FUNCTION_ARGS)
 
 	if (found)
 	{
-		bool byVal = rangerel->by_val;
+		PathmanRange *rng = (PathmanRange *) palloc(sizeof(PathmanRange));
 
-		elems = palloc(nelems * sizeof(Datum));
-		elems[0] = PATHMAN_GET_DATUM(ranges[i].min, byVal);
-		elems[1] = PATHMAN_GET_DATUM(ranges[i].max, byVal);
+		rng->type_oid = prel->atttype;
+		rng->by_val = rangerel->by_val;
+		rng->range = ranges[i];
 
-		arr = construct_array(elems, nelems, prel->atttype,
-							  tce->typlen, tce->typbyval, tce->typalign);
-		PG_RETURN_ARRAYTYPE_P(arr);
+		PG_RETURN_POINTER(rng);
 	}
 
 	PG_RETURN_NULL();
@@ -266,50 +288,6 @@ get_range_by_idx(PG_FUNCTION_ARGS)
 	PG_RETURN_ARRAYTYPE_P(
 		construct_array(elems, 2, prel->atttype,
 						tce->typlen, tce->typbyval, tce->typalign));
-}
-
-/*
- * Returns min value of the first range for relation
- */
-Datum
-get_min_range_value(PG_FUNCTION_ARGS)
-{
-	Oid					parent_oid = DatumGetObjectId(PG_GETARG_DATUM(0));
-	PartRelationInfo   *prel;
-	RangeRelation	   *rangerel;
-	RangeEntry		   *ranges;
-
-	prel = get_pathman_relation_info(parent_oid, NULL);
-	rangerel = get_pathman_range_relation(parent_oid, NULL);
-
-	if (!prel || !rangerel || prel->parttype != PT_RANGE || rangerel->ranges.elem_count == 0)
-		PG_RETURN_NULL();
-
-	ranges = dsm_array_get_pointer(&rangerel->ranges, true);
-
-	PG_RETURN_DATUM(PATHMAN_GET_DATUM(ranges[0].min, rangerel->by_val));
-}
-
-/*
- * Returns max value of the last range for relation
- */
-Datum
-get_max_range_value(PG_FUNCTION_ARGS)
-{
-	Oid					parent_oid = DatumGetObjectId(PG_GETARG_DATUM(0));
-	PartRelationInfo   *prel;
-	RangeRelation	   *rangerel;
-	RangeEntry		   *ranges;
-
-	prel = get_pathman_relation_info(parent_oid, NULL);
-	rangerel = get_pathman_range_relation(parent_oid, NULL);
-
-	if (!prel || !rangerel || prel->parttype != PT_RANGE || rangerel->ranges.elem_count == 0)
-		PG_RETURN_NULL();
-
-	ranges = dsm_array_get_pointer(&rangerel->ranges, true);
-
-	PG_RETURN_DATUM(PATHMAN_GET_DATUM(ranges[rangerel->ranges.elem_count - 1].max, rangerel->by_val));
 }
 
 /*
@@ -406,11 +384,8 @@ pathman_range_out(PG_FUNCTION_ARGS)
 	char	   *result;
 	char	   *left,
 			   *right;
-	Oid outputfunc;
-	bool typisvarlena;
-
-	// elog(NOTICE, "pathman_range_out");
-	// fclose(fopen("/tmp/123.txt", "w"));
+	Oid			outputfunc;
+	bool		typisvarlena;
 
 	getTypeOutputInfo(rng->type_oid, &outputfunc, &typisvarlena);
 	left = OidOutputFunctionCall(outputfunc, PATHMAN_GET_DATUM(rng->range.min, rng->by_val));
@@ -420,14 +395,17 @@ pathman_range_out(PG_FUNCTION_ARGS)
 	PG_RETURN_CSTRING(result);
 }
 
+/*
+ * Returns whole range covered by range partitions
+ */
 Datum
-get_range(PG_FUNCTION_ARGS)
+get_whole_range(PG_FUNCTION_ARGS)
 {
-	int parent_oid = DatumGetInt32(PG_GETARG_DATUM(0));
-	PartRelationInfo *prel;
-	RangeRelation	*rangerel;
-	RangeEntry		*ranges;
-	PathmanRange *pl_range;
+	PartRelationInfo   *prel;
+	RangeRelation	   *rangerel;
+	RangeEntry		   *ranges;
+	PathmanRange	   *rng;
+	int					parent_oid = DatumGetInt32(PG_GETARG_DATUM(0));
 
 	prel = get_pathman_relation_info(parent_oid, NULL);
 	rangerel = get_pathman_range_relation(parent_oid, NULL);
@@ -438,16 +416,20 @@ get_range(PG_FUNCTION_ARGS)
 	ranges = dsm_array_get_pointer(&rangerel->ranges, true);
 
 	/* Create range entry object */
-	pl_range = palloc(sizeof(PathmanRange));
-	pl_range->type_oid = prel->atttype;
-	pl_range->by_val = rangerel->by_val;
-	pl_range->range.child_oid = 0;
-	pl_range->range.min = ranges[0].min;
-	pl_range->range.max = ranges[rangerel->ranges.elem_count-1].max;
+	rng = palloc(sizeof(PathmanRange));
+	rng->type_oid = prel->atttype;
+	rng->by_val = rangerel->by_val;
+	rng->range.child_oid = 0;
+	rng->range.min = ranges[0].min;
+	rng->range.max = ranges[rangerel->ranges.elem_count-1].max;
 
-	PG_RETURN_POINTER(pl_range);
+	PG_RETURN_POINTER(rng);
 }
 
+/*
+ * Returns 0 if value fits into range, -1 if it's less than lower bound
+ * and 1 if it's greater than upper bound
+ */
 Datum
 range_value_cmp(PG_FUNCTION_ARGS)
 {
@@ -481,30 +463,69 @@ range_value_cmp(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(0);
 }
 
+/* Returns range lower bound */
 Datum
 range_lower(PG_FUNCTION_ARGS)
 {
 	PathmanRange   *rng = (PathmanRange *) PG_GETARG_POINTER(0);
+	Oid				return_type = get_fn_expr_rettype(fcinfo->flinfo);
+	Datum			result;
 
-	PG_RETURN_DATUM(PATHMAN_GET_DATUM(rng->range.min, rng->by_val));
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+
+	/* If lower bound value isn't the same as return type then convert it */
+	if (rng->type_oid != return_type)
+	{
+		bool by_val = get_typbyval(return_type);
+
+		result = cast_datum(rng->range.min, rng->type_oid, return_type);
+		PG_RETURN_DATUM(PATHMAN_GET_DATUM(result, by_val));
+	}
+	else
+		PG_RETURN_DATUM(PATHMAN_GET_DATUM(rng->range.min, rng->by_val));
 }
 
+/* Returns range upper bound */
 Datum
 range_upper(PG_FUNCTION_ARGS)
 {
 	PathmanRange   *rng = (PathmanRange *) PG_GETARG_POINTER(0);
+	Oid				return_type = get_fn_expr_rettype(fcinfo->flinfo);
+	Datum			result;
 
-	PG_RETURN_DATUM(PATHMAN_GET_DATUM(rng->range.max, rng->by_val));
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+
+	/* If lower bound value isn't the same as return type then convert it */
+	if (rng->type_oid != return_type)
+	{
+		bool by_val = get_typbyval(return_type);
+
+		result = cast_datum(rng->range.max, rng->type_oid, return_type);
+		PG_RETURN_DATUM(PATHMAN_GET_DATUM(result, by_val));
+	}
+	else
+		PG_RETURN_DATUM(PATHMAN_GET_DATUM(rng->range.max, rng->by_val));
 }
+
+/* Returns range relation's oid */
+Datum
+range_oid(PG_FUNCTION_ARGS)
+{
+	PathmanRange   *rng = (PathmanRange *) PG_GETARG_POINTER(0);
+
+	PG_RETURN_OID(rng->range.child_oid);
+}
+
 
 /*
  * Returns set of table partitions
  */
 Datum
-range_list(PG_FUNCTION_ARGS)
+range_partitions_list(PG_FUNCTION_ARGS)
 {
 	int			parent_oid = DatumGetInt32(PG_GETARG_DATUM(0));
-	// Datum		result;
 	FuncCallContext    *funcctx;
 	MemoryContext		oldcontext;
 	PathmanRangeListCtxt *fctx;
@@ -520,7 +541,7 @@ range_list(PG_FUNCTION_ARGS)
 		if (!prel || !rangerel || prel->parttype != PT_RANGE || rangerel->ranges.elem_count == 0)
 			SRF_RETURN_DONE(funcctx);
 
-		// switch context when allocating stuff to be used in later calls
+		/* Switch context when allocating stuff to be used in later calls */
 		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
 
 		fctx = (PathmanRangeListCtxt *) palloc(sizeof(PathmanRangeListCtxt));
@@ -530,7 +551,7 @@ range_list(PG_FUNCTION_ARGS)
 		fctx->nranges = prel->children_count;
 		fctx->type_oid = prel->atttype;
 
-		// return to original context when allocating transient memory
+		/* Return to original context when allocating transient memory */
 		MemoryContextSwitchTo(oldcontext);
 
 		funcctx->user_fctx = fctx;
@@ -548,8 +569,6 @@ range_list(PG_FUNCTION_ARGS)
 
 		rng->type_oid = fctx->type_oid;
 		rng->by_val = fctx->by_val;
-		// rng->min = fctx->ranges[pos].min;
-		// rng->max = fctx->ranges[pos].max;
 		rng->range = fctx->ranges[pos];
 
 		SRF_RETURN_NEXT(funcctx, PointerGetDatum(rng));

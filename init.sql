@@ -49,7 +49,7 @@ CREATE OR REPLACE FUNCTION @extschema@.pathman_range_out(PathmanRange)
     AS 'pg_pathman'
     LANGUAGE C IMMUTABLE STRICT;
 
-CREATE OR REPLACE FUNCTION @extschema@.get_range(relid OID)
+CREATE OR REPLACE FUNCTION @extschema@.get_whole_range(relid OID)
     RETURNS PathmanRange
     AS 'pg_pathman'
     LANGUAGE C STRICT;
@@ -62,11 +62,20 @@ CREATE OR REPLACE FUNCTION @extschema@.range_value_cmp(range PathmanRange, value
 CREATE OR REPLACE FUNCTION @extschema@.range_lower(range PathmanRange, dummy ANYELEMENT)
 	RETURNS ANYELEMENT
 	AS 'pg_pathman'
-	LANGUAGE C STRICT;
+	LANGUAGE C;
 
 CREATE OR REPLACE FUNCTION @extschema@.range_upper(range PathmanRange, dummy ANYELEMENT)
 	RETURNS ANYELEMENT
 	AS 'pg_pathman'
+	LANGUAGE C;
+
+CREATE OR REPLACE FUNCTION @extschema@.range_oid(range PathmanRange)
+	RETURNS OID
+	AS 'pg_pathman'
+	LANGUAGE C STRICT;
+
+CREATE OR REPLACE FUNCTION @extschema@.range_partitions_list(parent_relid OID)
+	RETURNS SETOF PATHMANRANGE AS 'pg_pathman'
 	LANGUAGE C STRICT;
 
 CREATE TYPE @extschema@.PathmanRange (
@@ -78,9 +87,9 @@ CREATE TYPE @extschema@.PathmanRange (
 /*
  * Returns min and max values for specified RANGE partition.
  */
-CREATE OR REPLACE FUNCTION @extschema@.get_partition_range(
-	parent_relid OID, partition_relid OID, dummy ANYELEMENT)
-RETURNS ANYARRAY AS 'pg_pathman', 'get_partition_range' LANGUAGE C STRICT;
+CREATE OR REPLACE FUNCTION @extschema@.get_range_partition_by_oid(
+	parent_relid OID, partition_relid OID)
+RETURNS PATHMANRANGE AS 'pg_pathman' LANGUAGE C STRICT;
 
 
 /*
@@ -89,20 +98,6 @@ RETURNS ANYARRAY AS 'pg_pathman', 'get_partition_range' LANGUAGE C STRICT;
 CREATE OR REPLACE FUNCTION @extschema@.get_range_by_idx(
 	parent_relid OID, idx INTEGER, dummy ANYELEMENT)
 RETURNS ANYARRAY AS 'pg_pathman', 'get_range_by_idx' LANGUAGE C STRICT;
-
-/*
- * Returns min value of the first range for relation
- */
-CREATE OR REPLACE FUNCTION @extschema@.get_min_range_value(
-	parent_relid OID, dummy ANYELEMENT)
-RETURNS ANYELEMENT AS 'pg_pathman', 'get_min_range_value' LANGUAGE C STRICT;
-
-/*
- * Returns max value of the last range for relation
- */
-CREATE OR REPLACE FUNCTION @extschema@.get_max_range_value(
-	parent_relid OID, dummy ANYELEMENT)
-RETURNS ANYELEMENT AS 'pg_pathman', 'get_max_range_value' LANGUAGE C STRICT;
 
 /*
  * Checks if range overlaps with existing partitions.
