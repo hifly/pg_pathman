@@ -95,9 +95,9 @@ RETURNS PATHMANRANGE AS 'pg_pathman' LANGUAGE C STRICT;
 /*
  * Returns N-th range (in form of array)
  */
-CREATE OR REPLACE FUNCTION @extschema@.get_range_by_idx(
-	parent_relid OID, idx INTEGER, dummy ANYELEMENT)
-RETURNS ANYARRAY AS 'pg_pathman', 'get_range_by_idx' LANGUAGE C STRICT;
+CREATE OR REPLACE FUNCTION @extschema@.get_range_partition_by_idx(
+	parent_relid OID, idx INTEGER)
+RETURNS PATHMANRANGE AS 'pg_pathman' LANGUAGE C STRICT;
 
 /*
  * Checks if range overlaps with existing partitions.

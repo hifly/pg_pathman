@@ -23,7 +23,7 @@ PG_FUNCTION_INFO_V1( on_partitions_created );
 PG_FUNCTION_INFO_V1( on_partitions_updated );
 PG_FUNCTION_INFO_V1( on_partitions_removed );
 PG_FUNCTION_INFO_V1( find_or_create_range_partition);
-PG_FUNCTION_INFO_V1( get_range_by_idx );
+PG_FUNCTION_INFO_V1( get_range_partition_by_idx );
 PG_FUNCTION_INFO_V1( get_range_partition_by_oid );
 PG_FUNCTION_INFO_V1( acquire_partitions_lock );
 PG_FUNCTION_INFO_V1( release_partitions_lock );
@@ -211,7 +211,6 @@ get_range_partition_by_oid(PG_FUNCTION_ARGS)
 	PartRelationInfo   *prel;
 	RangeRelation	   *rangerel;
 	RangeEntry		   *ranges;
-	TypeCacheEntry	   *tce;
 
 	prel = get_pathman_relation_info(parent_oid, NULL);
 
@@ -221,7 +220,6 @@ get_range_partition_by_oid(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 
 	ranges = dsm_array_get_pointer(&rangerel->ranges, true);
-	tce = lookup_type_cache(prel->atttype, 0);
 
 	/* Looking for specified partition */
 	for (i = 0; i < rangerel->ranges.elem_count; i++)
@@ -241,6 +239,7 @@ get_range_partition_by_oid(PG_FUNCTION_ARGS)
 
 		PG_RETURN_POINTER(rng);
 	}
+	pfree(ranges);
 
 	PG_RETURN_NULL();
 }
@@ -254,7 +253,7 @@ get_range_partition_by_oid(PG_FUNCTION_ARGS)
  * range will be returned).
  */
 Datum
-get_range_by_idx(PG_FUNCTION_ARGS)
+get_range_partition_by_idx(PG_FUNCTION_ARGS)
 {
 	Oid					parent_oid = DatumGetObjectId(PG_GETARG_DATUM(0));
 	int					idx = DatumGetInt32(PG_GETARG_DATUM(1));
@@ -262,8 +261,7 @@ get_range_by_idx(PG_FUNCTION_ARGS)
 	RangeRelation	   *rangerel;
 	RangeEntry		   *ranges;
 	RangeEntry			re;
-	Datum			   *elems;
-	TypeCacheEntry	   *tce;
+	PathmanRange	   *rng;
 
 	prel = get_pathman_relation_info(parent_oid, NULL);
 
@@ -272,22 +270,20 @@ get_range_by_idx(PG_FUNCTION_ARGS)
 	if (!prel || !rangerel || idx >= (int)rangerel->ranges.elem_count)
 		PG_RETURN_NULL();
 
-	tce = lookup_type_cache(prel->atttype, 0);
 	ranges = dsm_array_get_pointer(&rangerel->ranges, true);
 	if (idx >= 0)
 		re = ranges[idx];
 	else
 		re = ranges[rangerel->ranges.elem_count - 1];
 
-	elems = palloc(2 * sizeof(Datum));
-	elems[0] = PATHMAN_GET_DATUM(re.min, rangerel->by_val);
-	elems[1] = PATHMAN_GET_DATUM(re.max, rangerel->by_val);
+	rng = (PathmanRange *) palloc(sizeof(PathmanRange));
+	rng->type_oid = prel->atttype;
+	rng->by_val = rangerel->by_val;
+	rng->range = re;
 
 	pfree(ranges);
 
-	PG_RETURN_ARRAYTYPE_P(
-		construct_array(elems, 2, prel->atttype,
-						tce->typlen, tce->typbyval, tce->typalign));
+	PG_RETURN_POINTER(rng);
 }
 
 /*

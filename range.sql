@@ -705,7 +705,7 @@ BEGIN
 
 	v_atttype := @extschema@.get_attribute_type_name(p_relation, v_attname);
 
-	EXECUTE format('SELECT @extschema@.append_partition_internal($1, $2, $3, ARRAY[]::%s[])', v_atttype)
+	EXECUTE format('SELECT @extschema@.append_partition_internal($1, $2, $3, NULL::%s)', v_atttype)
 	INTO v_part_name
 	USING p_relation, v_atttype, v_interval;
 
@@ -729,21 +729,22 @@ CREATE OR REPLACE FUNCTION @extschema@.append_partition_internal(
 	p_relation REGCLASS
 	, p_atttype TEXT
 	, p_interval TEXT
-	, p_range ANYARRAY DEFAULT NULL)
+	, dummy ANYELEMENT DEFAULT NULL)
 RETURNS TEXT AS
 $$
 DECLARE
 	v_part_name TEXT;
+	v_rng       @extschema@.PATHMANRANGE;
 BEGIN
-	p_range := @extschema@.get_range_by_idx(p_relation::oid, -1, 0);
+	v_rng := @extschema@.get_range_partition_by_idx(p_relation::oid, -1);
 	RAISE NOTICE 'Appending new partition...';
 	IF @extschema@.is_date(p_atttype::regtype) THEN
 		v_part_name := @extschema@.create_single_range_partition(p_relation
-																 , p_range[2]
-																 , p_range[2] + p_interval::interval);
+																 , @extschema@.range_upper(v_rng, dummy)
+																 , @extschema@.range_upper(v_rng, dummy) + p_interval::interval);
 	ELSE
 		EXECUTE format('SELECT @extschema@.create_single_range_partition($1, $2, $2 + $3::%s)', p_atttype)
-		USING p_relation, p_range[2], p_interval
+		USING p_relation, @extschema@.range_upper(v_rng, dummy), p_interval
 		INTO v_part_name;
 	END IF;
 
@@ -772,7 +773,7 @@ BEGIN
 	FROM @extschema@.pathman_config WHERE relname::regclass = p_relation;
 	v_atttype := @extschema@.get_attribute_type_name(p_relation, v_attname);
 
-	EXECUTE format('SELECT @extschema@.prepend_partition_internal($1, $2, $3, ARRAY[]::%s[])', v_atttype)
+	EXECUTE format('SELECT @extschema@.prepend_partition_internal($1, $2, $3, NULL::%s)', v_atttype)
 	INTO v_part_name
 	USING p_relation, v_atttype, v_interval;
 
@@ -796,22 +797,23 @@ CREATE OR REPLACE FUNCTION @extschema@.prepend_partition_internal(
 	p_relation REGCLASS
 	, p_atttype TEXT
 	, p_interval TEXT
-	, p_range ANYARRAY DEFAULT NULL)
+	, dummy ANYELEMENT DEFAULT NULL)
 RETURNS TEXT AS
 $$
 DECLARE
 	v_part_name TEXT;
+	v_rng       @extschema@.PATHMANRANGE;
 BEGIN
-	p_range := @extschema@.get_range_by_idx(p_relation::oid, 0, 0);
+	v_rng := @extschema@.get_range_partition_by_idx(p_relation::oid, 0);
 	RAISE NOTICE 'Prepending new partition...';
 
 	IF @extschema@.is_date(p_atttype::regtype) THEN
 		v_part_name := @extschema@.create_single_range_partition(p_relation
-																 , p_range[1] - p_interval::interval
-																 , p_range[1]);
+																 , @extschema@.range_lower(v_rng, dummy) - p_interval::interval
+																 , @extschema@.range_lower(v_rng, dummy));
 	ELSE
 		EXECUTE format('SELECT @extschema@.create_single_range_partition($1, $2 - $3::%s, $2)', p_atttype)
-		USING p_relation, p_range[1], p_interval
+		USING p_relation, @extschema@.range_lower(v_rng, dummy), p_interval
 		INTO v_part_name;
 	END IF;
 
