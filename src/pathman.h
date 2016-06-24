@@ -77,6 +77,7 @@ typedef struct RelationKey
 typedef struct PartRelationInfo
 {
 	RelationKey		key;
+	bool			enable_parent;
 	DsmArray		children;
 	int				children_count;
 	PartType		parttype;

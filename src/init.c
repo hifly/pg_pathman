@@ -170,15 +170,16 @@ load_relations_hashtable(bool reinitialize)
 	List	   *part_oids = NIL;
 	ListCell   *lc;
 	char	   *schema;
+	char	   *query;
 	TypeCacheEntry *tce;
 	PartRelationInfo *prel;
-	char		sql[] = "SELECT pg_class.oid, pg_attribute.attnum,"
-								"cfg.parttype, pg_attribute.atttypid, pg_attribute.atttypmod "
+	char		sql[] = "SELECT pg_class.oid, pg_attribute.attnum, cfg.parttype, "
+   						"       pg_attribute.atttypid, pg_attribute.atttypmod, "
+   						"       cfg.enable_parent "
 						"FROM %s.pathman_config as cfg "
 						"JOIN pg_class ON pg_class.oid = cfg.relname::regclass::oid "
 						"JOIN pg_attribute ON pg_attribute.attname = lower(cfg.attname) "
 						"AND attrelid = pg_class.oid";
-	char *query;
 
 	SPI_connect();
 	schema = get_extension_schema();

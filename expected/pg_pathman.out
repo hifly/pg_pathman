@@ -1174,8 +1174,8 @@ SELECT * FROM test.range_rel WHERE dt = '2015-03-15';
 DROP TABLE test.range_rel CASCADE;
 NOTICE:  drop cascades to 16 other objects
 SELECT * FROM pathman.pathman_config;
- id | relname | attname | parttype | range_interval 
-----+---------+---------+----------+----------------
+ id | relname | attname | parttype | range_interval | enable_parent 
+----+---------+---------+----------+----------------+---------------
 (0 rows)
 
 /* Check overlaps */
@@ -1374,9 +1374,9 @@ NOTICE:  Copying data to partitions...
 DROP TABLE test."RangeRel" CASCADE;
 NOTICE:  drop cascades to 5 other objects
 SELECT * FROM pathman.pathman_config;
- id |      relname       | attname | parttype | range_interval 
-----+--------------------+---------+----------+----------------
-  9 | test.num_range_rel | id      |        2 | 1000
+ id |      relname       | attname | parttype | range_interval | enable_parent 
+----+--------------------+---------+----------+----------------+---------------
+  9 | test.num_range_rel | id      |        2 | 1000           | 
 (1 row)
 
 CREATE TABLE test."RangeRel" (

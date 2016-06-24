@@ -242,10 +242,12 @@ pathman_rel_pathlist_hook(PlannerInfo *root, RelOptInfo *rel, Index rti, RangeTb
 		/*
 		 * Expand simple_rte_array and simple_rel_array
 		 */
+		len = irange_list_length(ranges);
+		if (prel->enable_parent)
+			len++;
 
-		if (ranges)
+		if (len > 0)
 		{
-			len = irange_list_length(ranges);
 
 			/* Expand simple_rel_array and simple_rte_array */
 			new_rel_array = (RelOptInfo **)
@@ -256,11 +258,11 @@ pathman_rel_pathlist_hook(PlannerInfo *root, RelOptInfo *rel, Index rti, RangeTb
 				palloc0((root->simple_rel_array_size + len) * sizeof(RangeTblEntry *));
 
 			/* Copy relations to the new arrays */
-			for (i = 0; i < root->simple_rel_array_size; i++)
-			{
-				new_rel_array[i] = root->simple_rel_array[i];
-				new_rte_array[i] = root->simple_rte_array[i];
-			}
+	        for (i = 0; i < root->simple_rel_array_size; i++)
+	        {
+	                new_rel_array[i] = root->simple_rel_array[i];
+	                new_rte_array[i] = root->simple_rte_array[i];
+	        }
 
 			/* Free old arrays */
 			pfree(root->simple_rel_array);
@@ -270,6 +272,10 @@ pathman_rel_pathlist_hook(PlannerInfo *root, RelOptInfo *rel, Index rti, RangeTb
 			root->simple_rel_array = new_rel_array;
 			root->simple_rte_array = new_rte_array;
 		}
+
+		/* Add parent if needed */
+		if (prel->enable_parent)
+			append_child_relation(root, rel, rti, rte, i, rte->relid, NULL);
 
 		/*
 		 * Iterate all indexes in rangeset and append corresponding child

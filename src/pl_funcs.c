@@ -22,7 +22,9 @@ static Datum cast_datum(Datum src, Oid src_type, Oid target_type);
 PG_FUNCTION_INFO_V1( on_partitions_created );
 PG_FUNCTION_INFO_V1( on_partitions_updated );
 PG_FUNCTION_INFO_V1( on_partitions_removed );
-PG_FUNCTION_INFO_V1( find_or_create_range_partition);
+PG_FUNCTION_INFO_V1( on_enable_parent );
+PG_FUNCTION_INFO_V1( on_disable_parent );
+PG_FUNCTION_INFO_V1( find_or_create_range_partition );
 PG_FUNCTION_INFO_V1( get_range_partition_by_idx );
 PG_FUNCTION_INFO_V1( get_range_partition_by_oid );
 PG_FUNCTION_INFO_V1( acquire_partitions_lock );
@@ -129,6 +131,42 @@ on_partitions_removed(PG_FUNCTION_ARGS)
 	/* parent relation oid */
 	relid = DatumGetInt32(PG_GETARG_DATUM(0));
 	remove_relation_info(relid);
+
+	LWLockRelease(pmstate->load_config_lock);
+
+	PG_RETURN_NULL();
+}
+
+Datum
+on_enable_parent(PG_FUNCTION_ARGS)
+{
+	Oid		relid = DatumGetObjectId(PG_GETARG_DATUM(0));
+	PartRelationInfo   *prel;
+
+	LWLockAcquire(pmstate->load_config_lock, LW_EXCLUSIVE);
+
+	prel = get_pathman_relation_info(relid, NULL);
+	if (!prel)
+		elog(ERROR, "Relation %s isn't handled by pg_pathman", get_rel_name(relid));
+	prel->enable_parent = true;
+
+	LWLockRelease(pmstate->load_config_lock);
+
+	PG_RETURN_NULL();
+}
+
+Datum
+on_disable_parent(PG_FUNCTION_ARGS)
+{
+	Oid		relid = DatumGetObjectId(PG_GETARG_DATUM(0));
+	PartRelationInfo   *prel;
+
+	LWLockAcquire(pmstate->load_config_lock, LW_EXCLUSIVE);
+
+	prel = get_pathman_relation_info(relid, NULL);
+	if (!prel)
+		elog(ERROR, "Relation %s isn't handled by pg_pathman", get_rel_name(relid));
+	prel->enable_parent = false;
 
 	LWLockRelease(pmstate->load_config_lock);
 

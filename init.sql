@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS @extschema@.pathman_config (
 	relname			VARCHAR(127),
 	attname			VARCHAR(127),
 	parttype		INTEGER,
-	range_interval	TEXT
+	range_interval	TEXT,
+	enable_parent   BOOLEAN
 );
 SELECT pg_catalog.pg_extension_config_dump('@extschema@.pathman_config', '');
 
@@ -37,6 +38,38 @@ RETURNS VOID AS 'pg_pathman', 'on_partitions_removed' LANGUAGE C STRICT;
 
 CREATE OR REPLACE FUNCTION @extschema@.find_or_create_range_partition(relid OID, value ANYELEMENT)
 RETURNS OID AS 'pg_pathman', 'find_or_create_range_partition' LANGUAGE C STRICT;
+
+CREATE OR REPLACE FUNCTION @extschema@.on_enable_parent(relid OID)
+RETURNS OID AS 'pg_pathman' LANGUAGE C STRICT;
+
+CREATE OR REPLACE FUNCTION @extschema@.on_disable_parent(relid OID)
+RETURNS OID AS 'pg_pathman' LANGUAGE C STRICT;
+
+/* Include parent relation into query plan's for specified relation */
+CREATE OR REPLACE FUNCTION @extschema@.enable_parent(relation REGCLASS)
+RETURNS VOID AS
+$$
+BEGIN
+	UPDATE @extschema@.pathman_config SET enable_parent = TRUE
+	WHERE relname::regclass = relation;
+
+	PERFORM @extschema@.on_enable_parent(relation::regclass::oid);
+END
+$$
+LANGUAGE plpgsql;
+
+/* Do not include parent relation into query plan's for specified relation */
+CREATE OR REPLACE FUNCTION @extschema@.disable_parent(relation REGCLASS)
+RETURNS VOID AS
+$$
+BEGIN
+	UPDATE @extschema@.pathman_config SET enable_parent = FALSE
+	WHERE relname::regclass = relation;
+
+	PERFORM @extschema@.on_disable_parent(relation::regclass::oid);
+END
+$$
+LANGUAGE plpgsql;
 
 /* PathmanRange type */
 CREATE OR REPLACE FUNCTION @extschema@.pathman_range_in(cstring)
