@@ -145,7 +145,6 @@ RETURNS BOOLEAN AS 'pg_pathman', 'check_overlap' LANGUAGE C STRICT;
  */
 CREATE OR REPLACE FUNCTION @extschema@.partition_data(
 	p_parent regclass
-	, p_invalidate_cache_on_error BOOLEAN DEFAULT FALSE
 	, OUT p_total BIGINT)
 AS
 $$
@@ -168,14 +167,49 @@ BEGIN
 				, relname);
 	GET DIAGNOSTICS p_total = ROW_COUNT;
 	RETURN;
-
--- EXCEPTION WHEN others THEN
---     PERFORM on_remove_partitions(p_parent::regclass::integer);
---     RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
 END
 $$
 LANGUAGE plpgsql;
 
+
+CREATE OR REPLACE FUNCTION @extschema@.partition_data(
+    p_relation regclass
+    , p_min ANYELEMENT
+    , p_max ANYELEMENT
+    , p_limit INT DEFAULT NULL
+    , OUT p_total BIGINT)
+AS
+$$
+DECLARE
+    v_attr    TEXT;
+    v_limit_clause TEXT;
+BEGIN
+    SELECT attname INTO v_attr
+    FROM @extschema@.pathman_config WHERE relname::regclass = p_relation;
+
+    p_total := 0;
+
+    IF NOT p_limit IS NULL THEN
+        v_limit_clause := format('LIMIT %s', p_limit);
+    ELSE
+        v_limit_clause := '';
+    END IF;
+
+    /* Lock rows and copy data */
+    EXECUTE format('
+        WITH data AS (
+            DELETE FROM ONLY %1$s WHERE ctid IN (
+                SELECT ctid FROM ONLY %1$s WHERE %2$s >= $1 AND %2$s < $2 %3$s FOR UPDATE
+            ) RETURNING *)
+        INSERT INTO %1$s SELECT * FROM data'
+        , p_relation, v_attr, v_limit_clause)
+    USING p_min, p_max;
+
+    GET DIAGNOSTICS p_total = ROW_COUNT;
+    RETURN;
+END
+$$
+LANGUAGE plpgsql;
 
 /*
  * Disable pathman partitioning for specified relation
