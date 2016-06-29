@@ -174,35 +174,51 @@ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION @extschema@.partition_data(
     p_relation regclass
-    , p_min ANYELEMENT
-    , p_max ANYELEMENT
+    , p_min ANYELEMENT DEFAULT NULL::text
+    , p_max ANYELEMENT DEFAULT NULL::text
     , p_limit INT DEFAULT NULL
     , OUT p_total BIGINT)
 AS
 $$
 DECLARE
-    v_attr    TEXT;
-    v_limit_clause TEXT;
+    v_attr         TEXT;
+    v_limit_clause TEXT := '';
+    v_where_clause TEXT := '';
 BEGIN
     SELECT attname INTO v_attr
     FROM @extschema@.pathman_config WHERE relname::regclass = p_relation;
 
     p_total := 0;
 
+    /* Format LIMIT clause if needed */
     IF NOT p_limit IS NULL THEN
         v_limit_clause := format('LIMIT %s', p_limit);
-    ELSE
-        v_limit_clause := '';
+    END IF;
+
+    /* Format WHERE clause if needed */
+    IF NOT p_min IS NULL THEN
+        v_where_clause := format('%1$s >= $1', v_attr);
+    END IF;
+
+    IF NOT p_max IS NULL THEN
+        IF NOT p_min IS NULL THEN
+            v_where_clause := v_where_clause || ' AND ';
+        END IF;
+        v_where_clause := v_where_clause || format('%1$s < $2', v_attr);
+    END IF;
+
+    IF v_where_clause != '' THEN
+        v_where_clause := 'WHERE ' || v_where_clause;
     END IF;
 
     /* Lock rows and copy data */
     EXECUTE format('
         WITH data AS (
             DELETE FROM ONLY %1$s WHERE ctid IN (
-                SELECT ctid FROM ONLY %1$s WHERE %2$s >= $1 AND %2$s < $2 %3$s FOR UPDATE
+                SELECT ctid FROM ONLY %1$s %2$s %3$s FOR UPDATE
             ) RETURNING *)
         INSERT INTO %1$s SELECT * FROM data'
-        , p_relation, v_attr, v_limit_clause)
+        , p_relation, v_where_clause, v_limit_clause)
     USING p_min, p_max;
 
     GET DIAGNOSTICS p_total = ROW_COUNT;

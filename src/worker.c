@@ -13,39 +13,38 @@
  *
  * worker.c
  *
- * The purpose of this module is to create partitions in a separate
- * transaction. To do so we create a separate background worker,
- * pass arguments to it (see PartitionArgs) and gather the result
- * (which is the new partition oid).
+ * There are two background workers in this module
+ * First one is to create partitions in a separate transaction. To do so we
+ * create a separate background worker, pass arguments to it
+ * (see CreatePartitionsArgs) and gather the result (which is the new partition
+ * oid).
  *
+ * Second one is to partition data. It divides data into batches and start new
+ * transaction for each batch.
  *-------------------------------------------------------------------------
  */
 
 static dsm_segment *segment;
 
-static void bg_worker_main(Datum main_arg);
+static void start_bg_worker(bgworker_main_type main_func, void *args, size_t args_size, bool wait);
+static void create_partitions_bg_worker_main(Datum main_arg);
 
-typedef struct PartitionArgs
+typedef struct CreatePartitionsArgs
 {
 	Oid		dbid;
 	Oid		relid;
-#ifdef HAVE_INT64_TIMESTAMP
 	int64	value;
-#else
-	double	value;
-#endif
 	Oid		value_type;
 	bool	by_val;
 	Oid		result;
 	bool	crashed;
-} PartitionArgs;
+} CreatePartitionsArgs;
 
 /*
- * Starts background worker that will create new partitions,
- * waits till it finishes the job and returns the result (new partition oid)
+ * Common function to start background worker
  */
-Oid
-create_partitions_bg_worker(Oid relid, Datum value, Oid value_type)
+static void
+start_bg_worker(bgworker_main_type main_func, void *args, size_t args_size, bool wait)
 {
 #define HandleError(condition, new_state) \
 	if (condition) { exec_state = (new_state); goto handle_exec_state; }
@@ -66,40 +65,24 @@ create_partitions_bg_worker(Oid relid, Datum value, Oid value_type)
 	dsm_segment			   *segment;
 	dsm_handle				segment_handle;
 	pid_t					pid;
-	PartitionArgs		   *args;
-	TypeCacheEntry		   *tce;
-	Oid						child_oid = InvalidOid;
-
+	void				   *segment_pointer;
 
 	/* Create a dsm segment for the worker to pass arguments */
-	segment = dsm_create(sizeof(PartitionArgs), 0);
+	segment = dsm_create(args_size, 0);
 	segment_handle = dsm_segment_handle(segment);
 
-	tce = lookup_type_cache(value_type, 0);
-
 	/* Fill arguments structure */
-	args = (PartitionArgs *) dsm_segment_address(segment);
-	args->dbid = MyDatabaseId;
-	args->relid = relid;
-	if (tce->typbyval)
-		args->value = value;
-	else
-		memcpy(&args->value, DatumGetPointer(value), sizeof(args->value));
-	args->by_val = tce->typbyval;
-	args->value_type = value_type;
-	args->result = 0;
+	segment_pointer = dsm_segment_address(segment);
+	memcpy(segment_pointer, args, args_size);
 
 	/* Initialize worker struct */
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
 		BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
-	worker.bgw_main = bg_worker_main;
+	worker.bgw_main = main_func;
 	worker.bgw_main_arg = Int32GetDatum(segment_handle);
 	worker.bgw_notify_pid = MyProcPid;
-
-	LWLockAcquire(pmstate->load_config_lock, LW_EXCLUSIVE);
-	LWLockAcquire(pmstate->edit_partitions_lock, LW_EXCLUSIVE);
 
 	/* Start dynamic worker */
 	bgw_started = RegisterDynamicBackgroundWorker(&worker, &bgw_handle);
@@ -109,20 +92,18 @@ create_partitions_bg_worker(Oid relid, Datum value, Oid value_type)
 	bgw_status = WaitForBackgroundWorkerStartup(bgw_handle, &pid);
 	HandleError(bgw_status == BGWH_POSTMASTER_DIED, BGW_PM_DIED);
 
-	/* Wait till the worker finishes job */
-	bgw_status = WaitForBackgroundWorkerShutdown(bgw_handle);
-	HandleError(bgw_status == BGWH_POSTMASTER_DIED, BGW_PM_DIED);
+	if(wait)
+	{
+		/* Wait till the worker finishes job */
+		bgw_status = WaitForBackgroundWorkerShutdown(bgw_handle);
+		HandleError(bgw_status == BGWH_POSTMASTER_DIED, BGW_PM_DIED);
 
-	/* Save the result (partition Oid) */
-	child_oid = args->result;
-
+		/* Copy resulting data from dsm back into private memory */
+		memcpy(args, segment_pointer, args_size);
+	}
 
 /* end execution */
 handle_exec_state:
-	LWLockRelease(pmstate->load_config_lock);
-	LWLockRelease(pmstate->edit_partitions_lock);
-
-	/* Free dsm segment */
 	dsm_detach(segment);
 
 	switch (exec_state)
@@ -144,7 +125,47 @@ handle_exec_state:
 		default:
 			break;
 	}
+}
 
+/*
+ * Starts background worker that will create new partitions,
+ * waits till it finishes the job and returns the result (new partition oid)
+ */
+Oid
+create_partitions_bg_worker(Oid relid, Datum value, Oid value_type)
+{
+	CreatePartitionsArgs   *args;
+	TypeCacheEntry		   *tce;
+	Oid						child_oid;
+
+	tce = lookup_type_cache(value_type, 0);
+
+	/* Fill arguments structure */
+	args = palloc(sizeof(CreatePartitionsArgs));
+	args->dbid = MyDatabaseId;
+	args->relid = relid;
+	if (tce->typbyval)
+		args->value = value;
+	else
+		memcpy(&args->value, DatumGetPointer(value), sizeof(args->value));
+	args->by_val = tce->typbyval;
+	args->value_type = value_type;
+	args->result = 0;
+
+	LWLockAcquire(pmstate->load_config_lock, LW_EXCLUSIVE);
+	LWLockAcquire(pmstate->edit_partitions_lock, LW_EXCLUSIVE);
+
+	/* start worker and wait for it to finish */
+	start_bg_worker(create_partitions_bg_worker_main,
+					(void *)args,
+					sizeof(CreatePartitionsArgs),
+					true);
+
+	LWLockRelease(pmstate->load_config_lock);
+	LWLockRelease(pmstate->edit_partitions_lock);
+
+	child_oid = args->result;
+	pfree(args);
 	return child_oid;
 }
 
@@ -152,9 +173,9 @@ handle_exec_state:
  * Main worker routine. Accepts dsm_handle as an argument
  */
 static void
-bg_worker_main(Datum main_arg)
+create_partitions_bg_worker_main(Datum main_arg)
 {
-	PartitionArgs  *args;
+	CreatePartitionsArgs *args;
 	dsm_handle		handle = DatumGetInt32(main_arg);
 
 	/* Create resource owner */
