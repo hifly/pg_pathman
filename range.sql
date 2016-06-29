@@ -101,7 +101,7 @@ BEGIN
 	PERFORM @extschema@.on_create_partitions(p_relation::oid);
 
 	/* Copy data */
-	-- PERFORM @extschema@.partition_data(p_relation);
+	PERFORM @extschema@.partition_data(p_relation);
 
 	RETURN p_count;
 
@@ -190,7 +190,7 @@ BEGIN
 	PERFORM @extschema@.on_create_partitions(p_relation::regclass::oid);
 
 	/* Copy data */
-	-- PERFORM @extschema@.partition_data(p_relation);
+	PERFORM @extschema@.partition_data(p_relation);
 
 	RETURN p_count;
 

@@ -172,7 +172,7 @@ $$
 LANGUAGE plpgsql;
 
 
-CREATE OR REPLACE FUNCTION @extschema@.partition_data(
+CREATE OR REPLACE FUNCTION @extschema@.batch_partition_data(
     p_relation regclass
     , p_min ANYELEMENT DEFAULT NULL::text
     , p_max ANYELEMENT DEFAULT NULL::text
