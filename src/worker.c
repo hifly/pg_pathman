@@ -19,32 +19,65 @@
  * (see CreatePartitionsArgs) and gather the result (which is the new partition
  * oid).
  *
- * Second one is to partition data. It divides data into batches and start new
- * transaction for each batch.
+ * Second one is to distribute data among partitions. It divides data into
+ * batches and start new transaction for each batch.
  *-------------------------------------------------------------------------
  */
 
-static dsm_segment *segment;
+#define WORKER_SLOTS 10
 
-static void start_bg_worker(bgworker_main_type main_func, void *args, size_t args_size, bool wait);
+static void start_bg_worker(bgworker_main_type main_func, int arg, bool wait);
 static void create_partitions_bg_worker_main(Datum main_arg);
+static void partition_data_bg_worker_main(Datum main_arg);
 
 typedef struct CreatePartitionsArgs
 {
-	Oid		dbid;
-	Oid		relid;
-	int64	value;
-	Oid		value_type;
-	bool	by_val;
-	Oid		result;
-	bool	crashed;
+	Oid			dbid;
+	Oid			relid;
+	int64		value;
+	Oid			value_type;
+	bool		by_val;
+	Oid			result;
+	bool		crashed;
 } CreatePartitionsArgs;
+
+typedef struct PartitionDataArgs
+{
+	bool		working;
+	RelationKey	key;
+	uint32		batch_size;
+	uint32		batch_count;
+} PartitionDataArgs;
+
+PartitionDataArgs *slots;
+
+/*
+ * Initialize shared memory
+ */
+void
+create_worker_slots()
+{
+	bool	found;
+	size_t	size = get_worker_slots_size();
+
+	slots = (PartitionDataArgs *)
+		ShmemInitStruct("worker slots", size ,&found);
+
+	if (!found)
+		memset(slots, 0, size);
+}
+
+size_t
+get_worker_slots_size(void)
+{
+	return sizeof(PartitionDataArgs) * WORKER_SLOTS;
+}
 
 /*
  * Common function to start background worker
  */
 static void
-start_bg_worker(bgworker_main_type main_func, void *args, size_t args_size, bool wait)
+start_bg_worker(bgworker_main_type main_func, int arg, bool wait)
 {
 #define HandleError(condition, new_state) \
 	if (condition) { exec_state = (new_state); goto handle_exec_state; }
@@ -62,18 +95,7 @@ start_bg_worker(bgworker_main_type main_func, void *args, size_t args_size, bool
 	BackgroundWorkerHandle *bgw_handle;
 	BgwHandleStatus			bgw_status;
 	bool					bgw_started;
-	dsm_segment			   *segment;
-	dsm_handle				segment_handle;
 	pid_t					pid;
-	void				   *segment_pointer;
-
-	/* Create a dsm segment for the worker to pass arguments */
-	segment = dsm_create(args_size, 0);
-	segment_handle = dsm_segment_handle(segment);
-
-	/* Fill arguments structure */
-	segment_pointer = dsm_segment_address(segment);
-	memcpy(segment_pointer, args, args_size);
 
 	/* Initialize worker struct */
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
@@ -81,7 +103,7 @@ start_bg_worker(bgworker_main_type main_func, void *args, size_t args_size, bool
 	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
 	worker.bgw_main = main_func;
-	worker.bgw_main_arg = Int32GetDatum(segment_handle);
+	worker.bgw_main_arg = Int32GetDatum(arg);
 	worker.bgw_notify_pid = MyProcPid;
 
 	/* Start dynamic worker */
@@ -92,19 +114,18 @@ start_bg_worker(bgworker_main_type main_func, void *args, size_t args_size, bool
 	bgw_status = WaitForBackgroundWorkerStartup(bgw_handle, &pid);
 	HandleError(bgw_status == BGWH_POSTMASTER_DIED, BGW_PM_DIED);
 
+	elog(NOTICE, "worker pid: %u", pid);
+	sleep(60);
+
 	if(wait)
 	{
 		/* Wait till the worker finishes job */
 		bgw_status = WaitForBackgroundWorkerShutdown(bgw_handle);
 		HandleError(bgw_status == BGWH_POSTMASTER_DIED, BGW_PM_DIED);
-
-		/* Copy resulting data from dsm back into private memory */
-		memcpy(args, segment_pointer, args_size);
 	}
 
 /* end execution */
 handle_exec_state:
-	dsm_detach(segment);
 
 	switch (exec_state)
 	{
@@ -135,8 +156,12 @@ Oid
 create_partitions_bg_worker(Oid relid, Datum value, Oid value_type)
 {
 	CreatePartitionsArgs   *args;
+	size_t					args_size = sizeof(CreatePartitionsArgs);
 	TypeCacheEntry		   *tce;
 	Oid						child_oid;
+	dsm_segment			   *segment;
+	dsm_handle				segment_handle;
+	void				   *segment_pointer;
 
 	tce = lookup_type_cache(value_type, 0);
 
@@ -155,11 +180,22 @@ create_partitions_bg_worker(Oid relid, Datum value, Oid value_type)
 	LWLockAcquire(pmstate->load_config_lock, LW_EXCLUSIVE);
 	LWLockAcquire(pmstate->edit_partitions_lock, LW_EXCLUSIVE);
 
+	/* Create a dsm segment for the worker to pass arguments */
+	segment = dsm_create(args_size, 0);
+	segment_handle = dsm_segment_handle(segment);
+
+	/* Fill arguments structure */
+	segment_pointer = dsm_segment_address(segment);
+	memcpy(segment_pointer, args, args_size);
+
 	/* start worker and wait for it to finish */
 	start_bg_worker(create_partitions_bg_worker_main,
-					(void *)args,
-					sizeof(CreatePartitionsArgs),
+					segment_handle,
 					true);
+
+	/* Copy resulting data from dsm back into private memory */
+	memcpy(args, segment_pointer, args_size);
+	dsm_detach(segment);
 
 	LWLockRelease(pmstate->load_config_lock);
 	LWLockRelease(pmstate->edit_partitions_lock);
@@ -170,12 +206,49 @@ create_partitions_bg_worker(Oid relid, Datum value, Oid value_type)
 }
 
 /*
+ * Starts background worker that redistributes data. Function returns
+ * immediately
+ */
+void
+partition_data_bg_worker(Oid relid)
+{
+	PartitionDataArgs	   *args = NULL;
+	int i;
+
+	/* TODO: lock would be nice */
+
+	/* Look for empty slot */
+	for (i=0; i<WORKER_SLOTS; i++)
+	{
+		if (!slots[i].working)
+		{
+			args = &slots[i];
+			break;
+		}
+	}
+
+	if (args == NULL)
+		elog(ERROR, "No empty worker slots found");
+
+	/* Fill arguments structure */
+	args->working = 1;
+	args->key.dbid = MyDatabaseId;
+	args->key.relid = relid;
+
+	/* start worker and wait for it to finish */
+	start_bg_worker(partition_data_bg_worker_main,
+					i,
+					false);
+}
+
+/*
  * Main worker routine. Accepts dsm_handle as an argument
  */
 static void
 create_partitions_bg_worker_main(Datum main_arg)
 {
 	CreatePartitionsArgs *args;
+	dsm_segment	   *segment;
 	dsm_handle		handle = DatumGetInt32(main_arg);
 
 	/* Create resource owner */
@@ -215,7 +288,7 @@ create_partitions_bg_worker_main(Datum main_arg)
 Oid
 create_partitions(Oid relid, Datum value, Oid value_type, bool *crashed)
 {
-	Oid					oids[]	= { OIDOID,					 value_type };
+	Oid					types[]	= { OIDOID,					 value_type };
 	Datum				vals[]	= { ObjectIdGetDatum(relid), value };
 	bool				nulls[]	= { false,					 false };
 	char			   *sql;
@@ -242,7 +315,7 @@ create_partitions(Oid relid, Datum value, Oid value_type, bool *crashed)
 		Oid				partid = InvalidOid;
 		bool			isnull;
 
-		ret = SPI_execute_with_args(sql, 2, oids, vals, nulls, false, 0);
+		ret = SPI_execute_with_args(sql, 2, types, vals, nulls, false, 0);
 		if (ret > 0)
 		{
 			TupleDesc	tupdesc = SPI_tuptable->tupdesc;
@@ -268,4 +341,74 @@ create_partitions(Oid relid, Datum value, Oid value_type, bool *crashed)
 		return InvalidOid; /* compiler should be happy */
 	}
 	PG_END_TRY();
+}
+
+/*
+ * Main worker routine. Accepts dsm_handle as an argument
+ */
+static void
+partition_data_bg_worker_main(Datum main_arg)
+{
+	PartitionDataArgs   *args;
+	char		   *schema;
+	char		   *sql = NULL;
+	Oid				types[2]	= { OIDOID,	INT4OID };
+	Datum			vals[2];
+	bool			nulls[2]	= { false, false };
+	int rows;
+	int slot_idx = DatumGetInt32(main_arg);
+
+	/* Create resource owner */
+	CurrentResourceOwner = ResourceOwnerCreate(NULL, "PartitionDataWorker");
+
+	args = &slots[slot_idx];
+	vals[0] = args->key.relid;
+	vals[1] = 10000;
+
+	/* Establish connection and start transaction */
+	BackgroundWorkerInitializeConnectionByOid(args->key.dbid, InvalidOid);
+
+	do
+	{
+		StartTransactionCommand();
+		SPI_connect();
+		PushActiveSnapshot(GetTransactionSnapshot());
+
+		if (sql == NULL)
+		{
+			schema = get_extension_schema();
+			sql = psprintf("SELECT %s.batch_partition_data($1, p_limit:=$2)", schema);
+		}
+
+		PG_TRY();
+		{
+			int				ret;
+			bool			isnull;
+
+			ret = SPI_execute_with_args(sql, 2, types, vals, nulls, false, 0);
+			if (ret > 0)
+			{
+				TupleDesc	tupdesc = SPI_tuptable->tupdesc;
+				HeapTuple	tuple = SPI_tuptable->vals[0];
+
+				Assert(SPI_processed == 1);
+
+				rows = DatumGetInt32(SPI_getbinval(tuple, tupdesc, 1, &isnull));
+			}
+		}
+		PG_CATCH();
+		{
+			elog(ERROR, "Partition data failed");
+		}
+		PG_END_TRY();
+
+		SPI_finish();
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+	} while(rows > 0);
+
+	pfree(sql);
+	pfree(schema);
+
+	args->working = 0;
 }

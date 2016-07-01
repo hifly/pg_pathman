@@ -83,8 +83,8 @@ BEGIN
 	PERFORM @extschema@.create_or_replace_sequence(v_plain_schema, v_plain_relname);
 
 	/* Insert new entry to pathman config */
-	INSERT INTO @extschema@.pathman_config (relname, attname, parttype, range_interval)
-	VALUES (v_relname, p_attribute, 2, p_interval::text);
+	INSERT INTO @extschema@.pathman_config (relname, attname, parttype, range_interval, enable_parent)
+	VALUES (v_relname, p_attribute, 2, p_interval::text, true);
 
 	/* create first partition */
 	FOR i IN 1..p_count
@@ -101,7 +101,7 @@ BEGIN
 	PERFORM @extschema@.on_create_partitions(p_relation::oid);
 
 	/* Copy data */
-	PERFORM @extschema@.partition_data(p_relation);
+	-- PERFORM @extschema@.partition_data(p_relation);
 
 	RETURN p_count;
 
@@ -172,8 +172,8 @@ BEGIN
 	PERFORM @extschema@.create_or_replace_sequence(v_plain_schema, v_plain_relname);
 
 	/* Insert new entry to pathman config */
-	INSERT INTO @extschema@.pathman_config (relname, attname, parttype, range_interval)
-	VALUES (v_relname, p_attribute, 2, p_interval::text);
+	INSERT INTO @extschema@.pathman_config (relname, attname, parttype, range_interval, enable_parent)
+	VALUES (v_relname, p_attribute, 2, p_interval::text, true);
 
 	/* create first partition */
 	FOR i IN 1..p_count
@@ -190,7 +190,7 @@ BEGIN
 	PERFORM @extschema@.on_create_partitions(p_relation::regclass::oid);
 
 	/* Copy data */
-	PERFORM @extschema@.partition_data(p_relation);
+	-- PERFORM @extschema@.partition_data(p_relation);
 
 	RETURN p_count;
 
@@ -236,8 +236,8 @@ BEGIN
 										 , p_end_value);
 
 	/* Insert new entry to pathman config */
-	INSERT INTO @extschema@.pathman_config (relname, attname, parttype, range_interval)
-	VALUES (v_relname, p_attribute, 2, p_interval::text);
+	INSERT INTO @extschema@.pathman_config (relname, attname, parttype, range_interval, enable_parent)
+	VALUES (v_relname, p_attribute, 2, p_interval::text, true);
 
 	WHILE p_start_value <= p_end_value
 	LOOP
@@ -254,7 +254,7 @@ BEGIN
 	PERFORM @extschema@.on_create_partitions(p_relation::regclass::oid);
 
 	/* Copy data */
-	PERFORM @extschema@.partition_data(p_relation);
+	-- PERFORM @extschema@.partition_data(p_relation);
 
 	RETURN i;
 
@@ -296,8 +296,8 @@ BEGIN
 										 , p_end_value);
 
 	/* Insert new entry to pathman config */
-	INSERT INTO @extschema@.pathman_config (relname, attname, parttype, range_interval)
-	VALUES (v_relname, p_attribute, 2, p_interval::text);
+	INSERT INTO @extschema@.pathman_config (relname, attname, parttype, range_interval, enable_parent)
+	VALUES (v_relname, p_attribute, 2, p_interval::text, true);
 
 	WHILE p_start_value <= p_end_value
 	LOOP
@@ -311,7 +311,7 @@ BEGIN
 	PERFORM @extschema@.on_create_partitions(p_relation::regclass::oid);
 
 	/* Copy data */
-	PERFORM @extschema@.partition_data(p_relation);
+	-- PERFORM @extschema@.partition_data(p_relation);
 
 	RETURN i;
 

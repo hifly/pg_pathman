@@ -38,7 +38,9 @@ pathman_memsize()
 {
 	Size size;
 
-	size = get_dsm_shared_size() + MAXALIGN(sizeof(PathmanState));
+	size = get_dsm_shared_size() + 
+		   get_worker_slots_size() +
+		   MAXALIGN(sizeof(PathmanState));
 	return size;
 }
 
@@ -65,6 +67,7 @@ init_shmem_config()
 
 	create_relations_hashtable();
 	create_range_restrictions_hashtable();
+	create_worker_slots();
 }
 
 /*

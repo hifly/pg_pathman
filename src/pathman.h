@@ -109,14 +109,8 @@ typedef struct HashRelation
 typedef struct RangeEntry
 {
 	Oid				child_oid;
-
-#ifdef HAVE_INT64_TIMESTAMP
 	int64			min;
 	int64			max;
-#else
-	double			min;
-	double			max;
-#endif
 } RangeEntry;
 
 typedef struct RangeRelation
@@ -234,6 +228,8 @@ void load_config(void);
 void create_relations_hashtable(void);
 void create_hash_restrictions_hashtable(void);
 void create_range_restrictions_hashtable(void);
+size_t get_worker_slots_size(void);
+void create_worker_slots(void);
 void load_relations_hashtable(bool reinitialize);
 void load_check_constraints(Oid parent_oid, Snapshot snapshot);
 void remove_relation_info(Oid relid);
@@ -248,6 +244,7 @@ search_rangerel_result search_range_partition_eq(const Datum value,
 												 const RangeRelation *rangerel,
 												 RangeEntry *out_rentry);
 char *get_extension_schema(void);
+void partition_data_bg_worker(Oid relid);
 Oid create_partitions_bg_worker(Oid relid, Datum value, Oid value_type);
 Oid create_partitions(Oid relid, Datum value, Oid value_type, bool *crashed);
 uint32 make_hash(uint32 value, uint32 partitions);
