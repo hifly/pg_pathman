@@ -7,7 +7,10 @@
 #include "access/xact.h"
 #include "utils/snapmgr.h"
 #include "utils/typcache.h"
+#include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils.h"
+#include "funcapi.h"
 
 /*-------------------------------------------------------------------------
  *
@@ -30,6 +33,8 @@ static void start_bg_worker(bgworker_main_type main_func, int arg, bool wait);
 static void create_partitions_bg_worker_main(Datum main_arg);
 static void partition_data_bg_worker_main(Datum main_arg);
 
+PG_FUNCTION_INFO_V1( active_workers );
+
 typedef struct CreatePartitionsArgs
 {
 	Oid			dbid;
@@ -47,6 +52,8 @@ typedef struct PartitionDataArgs
 	RelationKey	key;
 	uint32		batch_size;
 	uint32		batch_count;
+	pid_t		pid;
+	size_t		total_rows;
 } PartitionDataArgs;
 
 PartitionDataArgs *slots;
@@ -357,13 +364,17 @@ partition_data_bg_worker_main(Datum main_arg)
 	bool			nulls[2]	= { false, false };
 	int rows;
 	int slot_idx = DatumGetInt32(main_arg);
+	MemoryContext	worker_context = CurrentMemoryContext;
 
 	/* Create resource owner */
 	CurrentResourceOwner = ResourceOwnerCreate(NULL, "PartitionDataWorker");
 
 	args = &slots[slot_idx];
+	args->pid = MyProcPid;
 	vals[0] = args->key.relid;
 	vals[1] = 10000;
+
+	sleep(20);
 
 	/* Establish connection and start transaction */
 	BackgroundWorkerInitializeConnectionByOid(args->key.dbid, InvalidOid);
@@ -376,14 +387,23 @@ partition_data_bg_worker_main(Datum main_arg)
 
 		if (sql == NULL)
 		{
+			MemoryContext oldcontext;
+
 			schema = get_extension_schema();
+
+			/*
+			 * Allocate as SQL query in top memory context because current
+			 * context will be destroyed after transaction finishes
+			 */
+			oldcontext = MemoryContextSwitchTo(worker_context);
 			sql = psprintf("SELECT %s.batch_partition_data($1, p_limit:=$2)", schema);
+			MemoryContextSwitchTo(oldcontext);
 		}
 
 		PG_TRY();
 		{
-			int				ret;
-			bool			isnull;
+			int		ret;
+			bool	isnull;
 
 			ret = SPI_execute_with_args(sql, 2, types, vals, nulls, false, 0);
 			if (ret > 0)
@@ -398,6 +418,8 @@ partition_data_bg_worker_main(Datum main_arg)
 		}
 		PG_CATCH();
 		{
+			pfree(sql);
+			pfree(schema);
 			elog(ERROR, "Partition data failed");
 		}
 		PG_END_TRY();
@@ -405,10 +427,89 @@ partition_data_bg_worker_main(Datum main_arg)
 		SPI_finish();
 		PopActiveSnapshot();
 		CommitTransactionCommand();
-	} while(rows > 0);
+
+		slots[slot_idx].total_rows += rows;
+	}
+	while(rows > 0);  // do while there is still rows to relocate
 
 	pfree(sql);
 	pfree(schema);
 
 	args->working = 0;
+}
+
+/* Function context for active_workers() SRF */
+typedef struct PartitionDataListCtxt
+{
+	int			cur_idx;
+} PartitionDataListCtxt;
+
+/*
+ * Returns list of active workers for partitioning data. Each record
+ * contains pid, relation name and number of processed rows
+ */
+Datum
+active_workers(PG_FUNCTION_ARGS)
+{
+	FuncCallContext    *funcctx;
+	MemoryContext		oldcontext;
+	TupleDesc			tupdesc;
+	PartitionDataListCtxt *userctx;
+	int					i;
+	Datum				result;
+	
+	if (SRF_IS_FIRSTCALL())
+	{
+		funcctx = SRF_FIRSTCALL_INIT();
+		/* Switch context when allocating stuff to be used in later calls */
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		userctx = (PartitionDataListCtxt *) palloc(sizeof(PartitionDataListCtxt));
+		userctx->cur_idx = 0;
+		funcctx->user_fctx = (void *) userctx;
+
+		/* Create tuple descriptor */
+		tupdesc = CreateTemplateTupleDesc(3, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "pid",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "relation",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "processed",
+						   INT4OID, -1, 0);
+		funcctx->attinmeta = TupleDescGetAttInMetadata(tupdesc);
+		funcctx->tuple_desc = BlessTupleDesc(tupdesc);
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+	userctx = (PartitionDataListCtxt *) funcctx->user_fctx;
+
+	/*
+	 * Iterate through worker slots
+	 */
+	for (i=userctx->cur_idx; i<WORKER_SLOTS; i++)
+	{
+		if (slots[i].working)
+		{
+			char	   *values[3];
+			char		txtpid[16];
+			char		txtrows[16];
+			HeapTuple	tuple;
+
+			sprintf(txtpid, "%d", slots[i].pid);
+			sprintf(txtrows, "%lu", slots[i].total_rows);
+			values[0] = txtpid;
+			values[1] = get_rel_name(slots[i].key.relid);
+			values[2] = txtrows;
+
+			tuple = BuildTupleFromCStrings(funcctx->attinmeta, values);
+
+			result = HeapTupleGetDatum(tuple);
+			userctx->cur_idx = i + 1;
+			SRF_RETURN_NEXT(funcctx, result);
+		}
+	}
+
+	SRF_RETURN_DONE(funcctx);
 }
