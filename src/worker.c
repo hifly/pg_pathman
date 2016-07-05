@@ -5,11 +5,12 @@
 #include "executor/spi.h"
 #include "storage/dsm.h"
 #include "access/xact.h"
+#include "utils.h"
 #include "utils/snapmgr.h"
 #include "utils/typcache.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
-#include "utils.h"
+#include "utils/fmgroids.h"
 #include "funcapi.h"
 
 /*-------------------------------------------------------------------------
@@ -34,6 +35,7 @@ static void create_partitions_bg_worker_main(Datum main_arg);
 static void partition_data_bg_worker_main(Datum main_arg);
 
 PG_FUNCTION_INFO_V1( active_workers );
+PG_FUNCTION_INFO_V1( stop_worker );
 
 typedef struct CreatePartitionsArgs
 {
@@ -46,9 +48,16 @@ typedef struct CreatePartitionsArgs
 	bool		crashed;
 } CreatePartitionsArgs;
 
+typedef enum WorkerStatus
+{
+	WS_FREE = 0,
+	WS_WORKING,
+	WS_STOPPING
+} WorkerStatus;
+
 typedef struct PartitionDataArgs
 {
-	bool		working;
+	WorkerStatus	status;
 	RelationKey	key;
 	uint32		batch_size;
 	uint32		batch_count;
@@ -122,7 +131,7 @@ start_bg_worker(bgworker_main_type main_func, int arg, bool wait)
 	HandleError(bgw_status == BGWH_POSTMASTER_DIED, BGW_PM_DIED);
 
 	elog(NOTICE, "worker pid: %u", pid);
-	sleep(60);
+	// sleep(30);
 
 	if(wait)
 	{
@@ -219,32 +228,49 @@ create_partitions_bg_worker(Oid relid, Datum value, Oid value_type)
 void
 partition_data_bg_worker(Oid relid)
 {
-	PartitionDataArgs	   *args = NULL;
-	int i;
+	PartitionDataArgs   *args = NULL;
+	int 	empty_slot_idx = -1;
+	int 	i;
 
 	/* TODO: lock would be nice */
 
-	/* Look for empty slot */
+	/* TODO: check that it is partitioned table */
+
+	/*
+	 * Look for empty slot and also check that partitioning data for this table
+	 * hasn't already starded
+	 */
 	for (i=0; i<WORKER_SLOTS; i++)
 	{
-		if (!slots[i].working)
+		if (slots[i].status == WS_FREE)
 		{
-			args = &slots[i];
-			break;
+			if (empty_slot_idx < 0)
+			{
+				args = &slots[i];
+				empty_slot_idx = i;
+			}
 		}
+		else if (slots[i].key.relid == relid && slots[i].key.dbid == MyDatabaseId)
+		{
+			elog(ERROR,
+				 "Table '%s' is already being partitioned",
+				 get_rel_name(relid));
+		}
+
 	}
 
 	if (args == NULL)
 		elog(ERROR, "No empty worker slots found");
 
 	/* Fill arguments structure */
-	args->working = 1;
+	args->status = WS_WORKING;
 	args->key.dbid = MyDatabaseId;
 	args->key.relid = relid;
+	args->total_rows = 0;
 
 	/* start worker and wait for it to finish */
 	start_bg_worker(partition_data_bg_worker_main,
-					i,
+					empty_slot_idx,
 					false);
 }
 
@@ -420,6 +446,7 @@ partition_data_bg_worker_main(Datum main_arg)
 		{
 			pfree(sql);
 			pfree(schema);
+			args->status = WS_FREE;
 			elog(ERROR, "Partition data failed");
 		}
 		PG_END_TRY();
@@ -428,14 +455,17 @@ partition_data_bg_worker_main(Datum main_arg)
 		PopActiveSnapshot();
 		CommitTransactionCommand();
 
-		slots[slot_idx].total_rows += rows;
+		args->total_rows += rows;
+
+		/* If other backend requested to stop worker then quit */
+		if (args->status == WS_STOPPING)
+			break;
 	}
-	while(rows > 0);  // do while there is still rows to relocate
+	while(rows > 0);  /* do while there is still rows to relocate */
 
 	pfree(sql);
 	pfree(schema);
-
-	args->working = 0;
+	args->status = WS_FREE;
 }
 
 /* Function context for active_workers() SRF */
@@ -469,13 +499,15 @@ active_workers(PG_FUNCTION_ARGS)
 		funcctx->user_fctx = (void *) userctx;
 
 		/* Create tuple descriptor */
-		tupdesc = CreateTemplateTupleDesc(3, false);
+		tupdesc = CreateTemplateTupleDesc(4, false);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "pid",
 						   INT4OID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "relation",
 						   TEXTOID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "processed",
 						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "relation",
+						   TEXTOID, -1, 0);
 		funcctx->attinmeta = TupleDescGetAttInMetadata(tupdesc);
 		funcctx->tuple_desc = BlessTupleDesc(tupdesc);
 
@@ -490,7 +522,7 @@ active_workers(PG_FUNCTION_ARGS)
 	 */
 	for (i=userctx->cur_idx; i<WORKER_SLOTS; i++)
 	{
-		if (slots[i].working)
+		if (slots[i].status != WS_FREE)
 		{
 			char	   *values[3];
 			char		txtpid[16];
@@ -502,6 +534,17 @@ active_workers(PG_FUNCTION_ARGS)
 			values[0] = txtpid;
 			values[1] = get_rel_name(slots[i].key.relid);
 			values[2] = txtrows;
+			switch(slots[i].status)
+			{
+				case WS_WORKING:
+					values[3] = "working";
+					break;
+				case WS_STOPPING:
+					values[3] = "stopping";
+					break;
+				default:
+					values[3] = "unknown";
+			}
 
 			tuple = BuildTupleFromCStrings(funcctx->attinmeta, values);
 
@@ -512,4 +555,34 @@ active_workers(PG_FUNCTION_ARGS)
 	}
 
 	SRF_RETURN_DONE(funcctx);
+}
+
+Datum
+stop_worker(PG_FUNCTION_ARGS)
+{
+	Oid		relid = PG_GETARG_OID(0);
+	int		i;
+
+	// PG_TRY();
+	// {
+	// 	relid = DatumGetObjectId(OidFunctionCall1(F_TO_REGCLASS, relname));
+	// }
+	// PG_CATCH();
+	// {
+	// 	elog(ERROR, "Couldn't find relation '%s'", DatumGetCString(relname));
+	// 	return InvalidOid; /* compiler should be happy */
+	// }
+	// PG_END_TRY();
+
+	for (i = 0; i < WORKER_SLOTS; i++)
+		if (slots[i].key.relid == relid && slots[i].key.dbid == MyDatabaseId)
+		{
+			// TerminateBackgroundWorker(&slots[i].bgw_handle);
+			slots[i].status = WS_STOPPING;
+			PG_RETURN_BOOL(true);
+		}
+
+	elog(ERROR,
+		 "Worker for relation '%s' not found",
+		 get_rel_name(relid));
 }
