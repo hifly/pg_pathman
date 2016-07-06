@@ -34,6 +34,7 @@ static void start_bg_worker(bgworker_main_type main_func, int arg, bool wait);
 static void create_partitions_bg_worker_main(Datum main_arg);
 static void partition_data_bg_worker_main(Datum main_arg);
 
+PG_FUNCTION_INFO_V1( partition_data_worker );
 PG_FUNCTION_INFO_V1( active_workers );
 PG_FUNCTION_INFO_V1( stop_worker );
 
@@ -228,13 +229,17 @@ create_partitions_bg_worker(Oid relid, Datum value, Oid value_type)
 void
 partition_data_bg_worker(Oid relid)
 {
-	PartitionDataArgs   *args = NULL;
+	PartitionDataArgs  *args = NULL;
 	int 	empty_slot_idx = -1;
 	int 	i;
 
 	/* TODO: lock would be nice */
 
-	/* TODO: check that it is partitioned table */
+	/* Check if relation is a partitioned table */
+	if (get_pathman_relation_info(relid, NULL) == NULL)
+		elog(ERROR,
+			 "Relation '%s' isn't partitioned by pg_pathman",
+			 get_rel_name(relid));
 
 	/*
 	 * Look for empty slot and also check that partitioning data for this table
@@ -272,6 +277,16 @@ partition_data_bg_worker(Oid relid)
 	start_bg_worker(partition_data_bg_worker_main,
 					empty_slot_idx,
 					false);
+}
+
+/*
+ * PL wrapper for partition_data_bg_worker() func
+ */
+Datum
+partition_data_worker( PG_FUNCTION_ARGS )
+{
+	(void) partition_data_bg_worker(PG_GETARG_OID(0));
+	PG_RETURN_VOID();
 }
 
 /*
@@ -506,7 +521,7 @@ active_workers(PG_FUNCTION_ARGS)
 						   TEXTOID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "processed",
 						   INT4OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "relation",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "status",
 						   TEXTOID, -1, 0);
 		funcctx->attinmeta = TupleDescGetAttInMetadata(tupdesc);
 		funcctx->tuple_desc = BlessTupleDesc(tupdesc);
@@ -524,7 +539,7 @@ active_workers(PG_FUNCTION_ARGS)
 	{
 		if (slots[i].status != WS_FREE)
 		{
-			char	   *values[3];
+			char	   *values[4];
 			char		txtpid[16];
 			char		txtrows[16];
 			HeapTuple	tuple;
