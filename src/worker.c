@@ -226,12 +226,13 @@ create_partitions_bg_worker(Oid relid, Datum value, Oid value_type)
  * Starts background worker that redistributes data. Function returns
  * immediately
  */
-void
-partition_data_bg_worker(Oid relid)
+Datum
+partition_data_worker( PG_FUNCTION_ARGS )
 {
+	Oid		relid = PG_GETARG_OID(0);
+	int		empty_slot_idx = -1;
+	int		i;
 	PartitionDataArgs  *args = NULL;
-	int 	empty_slot_idx = -1;
-	int 	i;
 
 	/* TODO: lock would be nice */
 
@@ -261,7 +262,6 @@ partition_data_bg_worker(Oid relid)
 				 "Table '%s' is already being partitioned",
 				 get_rel_name(relid));
 		}
-
 	}
 
 	if (args == NULL)
@@ -277,15 +277,11 @@ partition_data_bg_worker(Oid relid)
 	start_bg_worker(partition_data_bg_worker_main,
 					empty_slot_idx,
 					false);
-}
+	elog(NOTICE,
+		 "Worker started. You can stop it with the following command: "
+		 "select stop_worker('%s');",
+		 get_rel_name(relid));
 
-/*
- * PL wrapper for partition_data_bg_worker() func
- */
-Datum
-partition_data_worker( PG_FUNCTION_ARGS )
-{
-	(void) partition_data_bg_worker(PG_GETARG_OID(0));
 	PG_RETURN_VOID();
 }
 
@@ -415,7 +411,7 @@ partition_data_bg_worker_main(Datum main_arg)
 	vals[0] = args->key.relid;
 	vals[1] = 10000;
 
-	sleep(20);
+	// sleep(20);
 
 	/* Establish connection and start transaction */
 	BackgroundWorkerInitializeConnectionByOid(args->key.dbid, InvalidOid);
@@ -578,22 +574,14 @@ stop_worker(PG_FUNCTION_ARGS)
 	Oid		relid = PG_GETARG_OID(0);
 	int		i;
 
-	// PG_TRY();
-	// {
-	// 	relid = DatumGetObjectId(OidFunctionCall1(F_TO_REGCLASS, relname));
-	// }
-	// PG_CATCH();
-	// {
-	// 	elog(ERROR, "Couldn't find relation '%s'", DatumGetCString(relname));
-	// 	return InvalidOid; /* compiler should be happy */
-	// }
-	// PG_END_TRY();
-
 	for (i = 0; i < WORKER_SLOTS; i++)
-		if (slots[i].key.relid == relid && slots[i].key.dbid == MyDatabaseId)
+		if (slots[i].status != WS_FREE &&
+			slots[i].key.relid == relid &&
+			slots[i].key.dbid == MyDatabaseId)
 		{
-			// TerminateBackgroundWorker(&slots[i].bgw_handle);
 			slots[i].status = WS_STOPPING;
+			elog(NOTICE,
+				 "Worker will stop after current batch finished");
 			PG_RETURN_BOOL(true);
 		}
 
