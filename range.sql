@@ -36,7 +36,8 @@ CREATE OR REPLACE FUNCTION @extschema@.create_range_partitions(
 	, p_attribute   TEXT
 	, p_start_value ANYELEMENT
 	, p_interval    INTERVAL
-	, p_count       INTEGER DEFAULT NULL)
+	, p_count       INTEGER DEFAULT NULL
+	, p_partition_data BOOLEAN DEFAULT FALSE)
 RETURNS INTEGER AS
 $$
 DECLARE
@@ -95,13 +96,13 @@ BEGIN
 		p_start_value := p_start_value + p_interval;
 	END LOOP;
 
-	/* Create triggers */
-	-- PERFORM create_hash_update_trigger(relation, attribute, partitions_count);
 	/* Notify backend about changes */
 	PERFORM @extschema@.on_create_partitions(p_relation::oid);
 
 	/* Copy data */
-	-- PERFORM @extschema@.partition_data(p_relation);
+	IF p_partition_data = true THEN
+		PERFORM @extschema@.batch_partition_data(p_relation);
+	END IF;
 
 	RETURN p_count;
 
@@ -119,7 +120,8 @@ CREATE OR REPLACE FUNCTION @extschema@.create_range_partitions(
 	, p_attribute   TEXT
 	, p_start_value ANYELEMENT
 	, p_interval    ANYELEMENT
-	, p_count       INTEGER DEFAULT NULL)
+	, p_count       INTEGER DEFAULT NULL
+	, p_partition_data BOOLEAN DEFAULT FALSE)
 RETURNS INTEGER AS
 $$
 DECLARE
@@ -190,7 +192,9 @@ BEGIN
 	PERFORM @extschema@.on_create_partitions(p_relation::regclass::oid);
 
 	/* Copy data */
-	-- PERFORM @extschema@.partition_data(p_relation);
+	IF p_partition_data = true THEN
+		PERFORM @extschema@.batch_partition_data(p_relation);
+	END IF;
 
 	RETURN p_count;
 
@@ -208,7 +212,8 @@ CREATE OR REPLACE FUNCTION @extschema@.create_partitions_from_range(
 	, p_attribute   TEXT
 	, p_start_value ANYELEMENT
 	, p_end_value   ANYELEMENT
-	, p_interval    ANYELEMENT)
+	, p_interval    ANYELEMENT
+	, p_partition_data BOOLEAN DEFAULT FALSE)
 RETURNS INTEGER AS
 $$
 DECLARE
@@ -254,7 +259,9 @@ BEGIN
 	PERFORM @extschema@.on_create_partitions(p_relation::regclass::oid);
 
 	/* Copy data */
-	-- PERFORM @extschema@.partition_data(p_relation);
+	IF p_partition_data = true THEN
+		PERFORM @extschema@.batch_partition_data(p_relation);
+	END IF;
 
 	RETURN i;
 
@@ -272,7 +279,8 @@ CREATE OR REPLACE FUNCTION @extschema@.create_partitions_from_range(
 	, p_attribute   TEXT
 	, p_start_value ANYELEMENT
 	, p_end_value   ANYELEMENT
-	, p_interval    INTERVAL)
+	, p_interval    INTERVAL
+	, p_partition_data BOOLEAN DEFAULT FALSE)
 RETURNS INTEGER AS
 $$
 DECLARE
@@ -311,7 +319,9 @@ BEGIN
 	PERFORM @extschema@.on_create_partitions(p_relation::regclass::oid);
 
 	/* Copy data */
-	-- PERFORM @extschema@.partition_data(p_relation);
+	IF p_partition_data = true THEN
+		PERFORM @extschema@.batch_partition_data(p_relation);
+	END IF;
 
 	RETURN i;
 
@@ -330,6 +340,7 @@ CREATE OR REPLACE FUNCTION @extschema@.check_boundaries(
 	, p_start_value ANYELEMENT
 	, p_end_value ANYELEMENT)
 RETURNS VOID AS
+
 $$
 DECLARE
 	v_min p_start_value%TYPE;
