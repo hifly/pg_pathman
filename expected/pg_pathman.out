@@ -1412,7 +1412,69 @@ NOTICE:  Copying data to partitions...
 
 DROP TABLE test."RangeRel" CASCADE;
 NOTICE:  drop cascades to 3 other objects
-DROP EXTENSION pg_pathman;
+/* Concurrent partitioning */
+CREATE TABLE test.hash_rel (
+	id  SERIAL,
+	txt TEXT);
+INSERT INTO test.hash_rel(id) SELECT generate_series(1, 100000);
+SELECT pathman.create_hash_partitions('test.hash_rel', 'id', 3, p_partition_data := false);
+ create_hash_partitions 
+------------------------
+                      3
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM test.hash_rel;
+          QUERY PLAN          
+------------------------------
+ Append
+   ->  Seq Scan on hash_rel
+   ->  Seq Scan on hash_rel_0
+   ->  Seq Scan on hash_rel_1
+   ->  Seq Scan on hash_rel_2
+(5 rows)
+
+-- start worker
+SELECT pathman.partition_data_worker('test.hash_rel'::regclass);
+NOTICE:  Worker started. You can stop it with the following command: select stop_worker('hash_rel');
+ partition_data_worker 
+-----------------------
+ 
+(1 row)
+
+-- wait until it finishes
+DO
+$$
+DECLARE
+	countdown INT := 60;
+	rows      INT := 1;
+BEGIN
+	WHILE rows > 0 AND countdown > 0
+	LOOP
+		PERFORM pg_sleep(1);
+
+		SELECT COUNT(*) INTO rows
+		FROM pathman.pathman_active_workers WHERE relid = 'test.hash_rel'::regclass::oid;
+
+		countdown := countdown - 1;
+	END LOOP;
+END
+$$
+LANGUAGE plpgsql;
+-- check that all data was transfered to partitions
+SELECT COUNT(*) FROM ONLY test.hash_rel;
+ count 
+-------
+     0
+(1 row)
+
+SELECT COUNT(*) FROM test.hash_rel;
+ count  
+--------
+ 100000
+(1 row)
+
+DROP EXTENSION pg_pathman CASCADE;
+NOTICE:  drop cascades to 3 other objects
 /* Test that everithing works fine without schemas */
 CREATE EXTENSION pg_pathman;
 /* Hash */

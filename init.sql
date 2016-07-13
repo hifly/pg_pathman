@@ -74,10 +74,15 @@ LANGUAGE plpgsql;
 /*
  * Partitioning data tools
  */
-CREATE OR REPLACE FUNCTION @extschema@.active_workers(OUT pid INT, OUT relation TEXT, OUT processed INT, OUT status TEXT)
+CREATE OR REPLACE FUNCTION @extschema@.active_workers(
+	OUT pid INT,
+	OUT dbid INT,
+	OUT relid INT,
+	OUT processed INT,
+	OUT status TEXT)
 AS 'pg_pathman' LANGUAGE C STRICT;
 
-CREATE OR REPLACE VIEW @extschema@.active_workers
+CREATE OR REPLACE VIEW @extschema@.pathman_active_workers
 AS SELECT * FROM @extschema@.active_workers();
 
 CREATE OR REPLACE FUNCTION @extschema@.partition_data_worker(relation regclass)

@@ -510,14 +510,16 @@ active_workers(PG_FUNCTION_ARGS)
 		funcctx->user_fctx = (void *) userctx;
 
 		/* Create tuple descriptor */
-		tupdesc = CreateTemplateTupleDesc(4, false);
+		tupdesc = CreateTemplateTupleDesc(5, false);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "pid",
 						   INT4OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "relation",
-						   TEXTOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "processed",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "dbid",
 						   INT4OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "status",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "relid",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "processed",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "status",
 						   TEXTOID, -1, 0);
 		funcctx->attinmeta = TupleDescGetAttInMetadata(tupdesc);
 		funcctx->tuple_desc = BlessTupleDesc(tupdesc);
@@ -535,26 +537,31 @@ active_workers(PG_FUNCTION_ARGS)
 	{
 		if (slots[i].status != WS_FREE)
 		{
-			char	   *values[4];
+			char	   *values[5];
 			char		txtpid[16];
+			char		txtdbid[16];
+			char		txtrelid[16];
 			char		txtrows[16];
 			HeapTuple	tuple;
 
 			sprintf(txtpid, "%d", slots[i].pid);
 			sprintf(txtrows, "%lu", slots[i].total_rows);
+			sprintf(txtdbid, "%u", slots[i].key.dbid);
+			sprintf(txtrelid, "%u", slots[i].key.relid);
 			values[0] = txtpid;
-			values[1] = get_rel_name(slots[i].key.relid);
-			values[2] = txtrows;
+			values[1] = txtdbid;
+			values[2] = txtrelid;
+			values[3] = txtrows;
 			switch(slots[i].status)
 			{
 				case WS_WORKING:
-					values[3] = "working";
+					values[4] = "working";
 					break;
 				case WS_STOPPING:
-					values[3] = "stopping";
+					values[4] = "stopping";
 					break;
 				default:
-					values[3] = "unknown";
+					values[4] = "unknown";
 			}
 
 			tuple = BuildTupleFromCStrings(funcctx->attinmeta, values);

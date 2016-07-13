@@ -557,7 +557,39 @@ SELECT pathman.drop_partitions('test."RangeRel"');
 SELECT pathman.create_partitions_from_range('test."RangeRel"', 'id', 1, 300, 100);
 DROP TABLE test."RangeRel" CASCADE;
 
-DROP EXTENSION pg_pathman;
+/* Concurrent partitioning */
+CREATE TABLE test.hash_rel (
+	id  SERIAL,
+	txt TEXT);
+INSERT INTO test.hash_rel(id) SELECT generate_series(1, 100000);
+SELECT pathman.create_hash_partitions('test.hash_rel', 'id', 3, p_partition_data := false);
+EXPLAIN (COSTS OFF) SELECT * FROM test.hash_rel;
+-- start worker
+SELECT pathman.partition_data_worker('test.hash_rel'::regclass);
+-- wait until it finishes
+DO
+$$
+DECLARE
+	countdown INT := 60;
+	rows      INT := 1;
+BEGIN
+	WHILE rows > 0 AND countdown > 0
+	LOOP
+		PERFORM pg_sleep(1);
+
+		SELECT COUNT(*) INTO rows
+		FROM pathman.pathman_active_workers WHERE relid = 'test.hash_rel'::regclass::oid;
+
+		countdown := countdown - 1;
+	END LOOP;
+END
+$$
+LANGUAGE plpgsql;
+-- check that all data was transfered to partitions
+SELECT COUNT(*) FROM ONLY test.hash_rel;
+SELECT COUNT(*) FROM test.hash_rel;
+
+DROP EXTENSION pg_pathman CASCADE;
 
 /* Test that everithing works fine without schemas */
 CREATE EXTENSION pg_pathman;
