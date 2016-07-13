@@ -778,6 +778,9 @@ set pg_pathman.enable = true
 set enable_hashjoin = off
 set enable_mergejoin = off;
 NOTICE:  RuntimeAppend, RuntimeMergeAppend and PartitionFilter nodes have been enabled
+SET enable_hashjoin   = ON;
+SET enable_mergejoin  = ON;
+SET enable_nestloop   = ON;
 create table test.run_values as select generate_series(1, 10000) val;
 create table test.runtime_test_1(id serial primary key, val real);
 insert into test.runtime_test_1 select generate_series(1, 10000), random();
@@ -1376,7 +1379,7 @@ NOTICE:  drop cascades to 5 other objects
 SELECT * FROM pathman.pathman_config;
  id |      relname       | attname | parttype | range_interval | enable_parent 
 ----+--------------------+---------+----------+----------------+---------------
-  9 | test.num_range_rel | id      |        2 | 1000           | 
+  9 | test.num_range_rel | id      |        2 | 1000           | f
 (1 row)
 
 CREATE TABLE test."RangeRel" (

@@ -368,7 +368,9 @@ set pg_pathman.enable = true
 set enable_hashjoin = off
 set enable_mergejoin = off;
 
-
+SET enable_hashjoin   = ON;
+SET enable_mergejoin  = ON;
+SET enable_nestloop   = ON;
 
 create table test.run_values as select generate_series(1, 10000) val;
 create table test.runtime_test_1(id serial primary key, val real);

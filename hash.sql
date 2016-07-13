@@ -15,7 +15,8 @@ CREATE OR REPLACE FUNCTION @extschema@.create_hash_partitions(
 	relation REGCLASS
 	, attribute TEXT
 	, partitions_count INTEGER
-) RETURNS INTEGER AS
+	, p_partition_data BOOLEAN DEFAULT true)
+RETURNS INTEGER AS
 $$
 DECLARE
 	v_relname       TEXT;
@@ -24,15 +25,13 @@ DECLARE
 	v_plain_schema  TEXT;
 	v_plain_relname TEXT;
 	v_hashfunc      TEXT;
+	v_enable_parent BOOLEAN := NOT p_partition_data;
 BEGIN
 	v_relname := @extschema@.validate_relname(relation);
 	attribute := lower(attribute);
 	PERFORM @extschema@.common_relation_checks(relation, attribute);
 
 	v_type := @extschema@.get_attribute_type_name(v_relname, attribute);
-	-- IF v_type::regtype != 'integer'::regtype THEN
-	-- 	RAISE EXCEPTION 'Attribute type must be INTEGER';
-	-- END IF;
 
 	SELECT * INTO v_plain_schema, v_plain_relname
 	FROM @extschema@.get_plain_schema_and_relname(relation);
@@ -42,7 +41,6 @@ BEGIN
 	/* Create partitions and update pg_pathman configuration */
 	FOR partnum IN 0..partitions_count-1
 	LOOP
-		-- v_child_relname := @extschema@.get_schema_qualified_name(relation, '.', suffix := '_' || partnum);
 		v_child_relname := format('%s.%s',
         						  v_plain_schema,
         						  quote_ident(v_plain_relname || '_' || partnum));
@@ -62,8 +60,8 @@ BEGIN
 					   , partitions_count
 					   , partnum);
 	END LOOP;
-	INSERT INTO @extschema@.pathman_config (relname, attname, parttype)
-	VALUES (v_relname, attribute, 1);
+	INSERT INTO @extschema@.pathman_config (relname, attname, parttype, enable_parent)
+	VALUES (v_relname, attribute, 1, v_enable_parent);
 
 	/* Create triggers */
 	/* Do not create update trigger by default */
@@ -73,7 +71,9 @@ BEGIN
 	PERFORM @extschema@.on_create_partitions(relation::oid);
 
 	/* Copy data */
-	PERFORM @extschema@.partition_data(relation);
+	IF p_partition_data = true THEN
+		PERFORM @extschema@.partition_data(relation);
+	END IF;
 
 	RETURN partitions_count;
 END

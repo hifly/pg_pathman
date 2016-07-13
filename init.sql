@@ -159,35 +159,6 @@ RETURNS BOOLEAN AS 'pg_pathman', 'check_overlap' LANGUAGE C STRICT;
  * Copy rows to partitions
  */
 CREATE OR REPLACE FUNCTION @extschema@.partition_data(
-	p_parent regclass
-	, OUT p_total BIGINT)
-AS
-$$
-DECLARE
-	relname TEXT;
-	rec RECORD;
-	cnt BIGINT := 0;
-BEGIN
-	relname := @extschema@.validate_relname(p_parent);
-
-	p_total := 0;
-
-	/* Create partitions and copy rest of the data */
-	RAISE NOTICE 'Copying data to partitions...';
-	EXECUTE format('
-				WITH part_data AS (
-					DELETE FROM ONLY %s RETURNING *)
-				INSERT INTO %s SELECT * FROM part_data'
-				, relname
-				, relname);
-	GET DIAGNOSTICS p_total = ROW_COUNT;
-	RETURN;
-END
-$$
-LANGUAGE plpgsql;
-
-
-CREATE OR REPLACE FUNCTION @extschema@.batch_partition_data(
     p_relation regclass
     , p_min ANYELEMENT DEFAULT NULL::text
     , p_max ANYELEMENT DEFAULT NULL::text
@@ -227,6 +198,7 @@ BEGIN
     END IF;
 
     /* Lock rows and copy data */
+    RAISE NOTICE 'Copying data to partitions...';
     EXECUTE format('
         WITH data AS (
             DELETE FROM ONLY %1$s WHERE ctid IN (

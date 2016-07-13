@@ -210,6 +210,7 @@ load_relations_hashtable(bool reinitialize)
 			prel->parttype = DatumGetInt32(SPI_getbinval(tuple, tupdesc, 3, &isnull));
 			prel->atttype = DatumGetObjectId(SPI_getbinval(tuple, tupdesc, 4, &isnull));
 			prel->atttypmod = DatumGetInt32(SPI_getbinval(tuple, tupdesc, 5, &isnull));
+			prel->enable_parent = DatumGetBool(SPI_getbinval(tuple, tupdesc, 6, &isnull));
 
 			tce = lookup_type_cache(prel->atttype, 	TYPECACHE_CMP_PROC | TYPECACHE_HASH_PROC);
 			prel->cmp_proc = tce->cmp_proc;

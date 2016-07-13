@@ -131,7 +131,7 @@ start_bg_worker(bgworker_main_type main_func, int arg, bool wait)
 	bgw_status = WaitForBackgroundWorkerStartup(bgw_handle, &pid);
 	HandleError(bgw_status == BGWH_POSTMASTER_DIED, BGW_PM_DIED);
 
-	elog(NOTICE, "worker pid: %u", pid);
+	// elog(NOTICE, "worker pid: %u", pid);
 	// sleep(30);
 
 	if(wait)
@@ -433,7 +433,7 @@ partition_data_bg_worker_main(Datum main_arg)
 			 * context will be destroyed after transaction finishes
 			 */
 			oldcontext = MemoryContextSwitchTo(worker_context);
-			sql = psprintf("SELECT %s.batch_partition_data($1, p_limit:=$2)", schema);
+			sql = psprintf("SELECT %s.partition_data($1, p_limit:=$2)", schema);
 			MemoryContextSwitchTo(oldcontext);
 		}
 

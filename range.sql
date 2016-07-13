@@ -37,7 +37,7 @@ CREATE OR REPLACE FUNCTION @extschema@.create_range_partitions(
 	, p_start_value ANYELEMENT
 	, p_interval    INTERVAL
 	, p_count       INTEGER DEFAULT NULL
-	, p_partition_data BOOLEAN DEFAULT FALSE)
+	, p_partition_data BOOLEAN DEFAULT true)
 RETURNS INTEGER AS
 $$
 DECLARE
@@ -47,6 +47,7 @@ DECLARE
 	v_cur_value     p_start_value%TYPE := p_start_value;
 	v_plain_relname TEXT;
 	v_plain_schema  TEXT;
+	v_enable_parent BOOLEAN := NOT p_partition_data;
 	i               INTEGER;
 BEGIN
 	v_relname := @extschema@.validate_relname(p_relation);
@@ -85,7 +86,7 @@ BEGIN
 
 	/* Insert new entry to pathman config */
 	INSERT INTO @extschema@.pathman_config (relname, attname, parttype, range_interval, enable_parent)
-	VALUES (v_relname, p_attribute, 2, p_interval::text, true);
+	VALUES (v_relname, p_attribute, 2, p_interval::text, v_enable_parent);
 
 	/* create first partition */
 	FOR i IN 1..p_count
@@ -101,7 +102,7 @@ BEGIN
 
 	/* Copy data */
 	IF p_partition_data = true THEN
-		PERFORM @extschema@.batch_partition_data(p_relation);
+		PERFORM @extschema@.partition_data(p_relation);
 	END IF;
 
 	RETURN p_count;
@@ -121,7 +122,7 @@ CREATE OR REPLACE FUNCTION @extschema@.create_range_partitions(
 	, p_start_value ANYELEMENT
 	, p_interval    ANYELEMENT
 	, p_count       INTEGER DEFAULT NULL
-	, p_partition_data BOOLEAN DEFAULT FALSE)
+	, p_partition_data BOOLEAN DEFAULT true)
 RETURNS INTEGER AS
 $$
 DECLARE
@@ -129,9 +130,10 @@ DECLARE
 	v_rows_count    INTEGER;
 	v_max           p_start_value%TYPE;
 	v_cur_value     p_start_value%TYPE := p_start_value;
-	i               INTEGER;
 	v_plain_schema  TEXT;
 	v_plain_relname TEXT;
+	v_enable_parent BOOLEAN := NOT p_partition_data;
+	i               INTEGER;
 BEGIN
 	v_relname := @extschema@.validate_relname(p_relation);
 	p_attribute := lower(p_attribute);
@@ -175,7 +177,7 @@ BEGIN
 
 	/* Insert new entry to pathman config */
 	INSERT INTO @extschema@.pathman_config (relname, attname, parttype, range_interval, enable_parent)
-	VALUES (v_relname, p_attribute, 2, p_interval::text, true);
+	VALUES (v_relname, p_attribute, 2, p_interval::text, v_enable_parent);
 
 	/* create first partition */
 	FOR i IN 1..p_count
@@ -193,7 +195,7 @@ BEGIN
 
 	/* Copy data */
 	IF p_partition_data = true THEN
-		PERFORM @extschema@.batch_partition_data(p_relation);
+		PERFORM @extschema@.partition_data(p_relation);
 	END IF;
 
 	RETURN p_count;
@@ -213,13 +215,14 @@ CREATE OR REPLACE FUNCTION @extschema@.create_partitions_from_range(
 	, p_start_value ANYELEMENT
 	, p_end_value   ANYELEMENT
 	, p_interval    ANYELEMENT
-	, p_partition_data BOOLEAN DEFAULT FALSE)
+	, p_partition_data BOOLEAN DEFAULT true)
 RETURNS INTEGER AS
 $$
 DECLARE
 	v_relname       TEXT;
 	v_plain_schema  TEXT;
 	v_plain_relname TEXT;
+	v_enable_parent BOOLEAN := NOT p_partition_data;
 	i               INTEGER := 0;
 BEGIN
 	v_relname := @extschema@.validate_relname(p_relation);
@@ -242,7 +245,7 @@ BEGIN
 
 	/* Insert new entry to pathman config */
 	INSERT INTO @extschema@.pathman_config (relname, attname, parttype, range_interval, enable_parent)
-	VALUES (v_relname, p_attribute, 2, p_interval::text, true);
+	VALUES (v_relname, p_attribute, 2, p_interval::text, v_enable_parent);
 
 	WHILE p_start_value <= p_end_value
 	LOOP
@@ -260,7 +263,7 @@ BEGIN
 
 	/* Copy data */
 	IF p_partition_data = true THEN
-		PERFORM @extschema@.batch_partition_data(p_relation);
+		PERFORM @extschema@.partition_data(p_relation);
 	END IF;
 
 	RETURN i;
@@ -280,13 +283,14 @@ CREATE OR REPLACE FUNCTION @extschema@.create_partitions_from_range(
 	, p_start_value ANYELEMENT
 	, p_end_value   ANYELEMENT
 	, p_interval    INTERVAL
-	, p_partition_data BOOLEAN DEFAULT FALSE)
+	, p_partition_data BOOLEAN DEFAULT true)
 RETURNS INTEGER AS
 $$
 DECLARE
 	v_relname       TEXT;
 	v_plain_schema  TEXT;
 	v_plain_relname TEXT;
+	v_enable_parent BOOLEAN := NOT p_partition_data;
 	i               INTEGER := 0;
 BEGIN
 	v_relname := @extschema@.validate_relname(p_relation);
@@ -305,7 +309,7 @@ BEGIN
 
 	/* Insert new entry to pathman config */
 	INSERT INTO @extschema@.pathman_config (relname, attname, parttype, range_interval, enable_parent)
-	VALUES (v_relname, p_attribute, 2, p_interval::text, true);
+	VALUES (v_relname, p_attribute, 2, p_interval::text, v_enable_parent);
 
 	WHILE p_start_value <= p_end_value
 	LOOP
@@ -320,7 +324,7 @@ BEGIN
 
 	/* Copy data */
 	IF p_partition_data = true THEN
-		PERFORM @extschema@.batch_partition_data(p_relation);
+		PERFORM @extschema@.partition_data(p_relation);
 	END IF;
 
 	RETURN i;
