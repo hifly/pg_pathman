@@ -1,16 +1,18 @@
 #include "pathman.h"
-#include "miscadmin.h"
 #include "postmaster/bgworker.h"
 #include "catalog/pg_type.h"
 #include "executor/spi.h"
 #include "storage/dsm.h"
+#include "storage/ipc.h"
+#include "storage/latch.h"
 #include "access/xact.h"
-#include "utils.h"
 #include "utils/snapmgr.h"
 #include "utils/typcache.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/fmgroids.h"
+#include "utils.h"
+#include "miscadmin.h"
 #include "funcapi.h"
 
 /*-------------------------------------------------------------------------
@@ -30,9 +32,13 @@
 
 #define WORKER_SLOTS 10
 
-static void start_bg_worker(bgworker_main_type main_func, int arg, bool wait);
+static void start_bg_worker(char name[BGW_MAXLEN],
+				bgworker_main_type main_func,
+				int arg,
+				bool wait);
 static void create_partitions_bg_worker_main(Datum main_arg);
 static void partition_data_bg_worker_main(Datum main_arg);
+static void handle_sigterm(SIGNAL_ARGS);
 
 PG_FUNCTION_INFO_V1( partition_data_worker );
 PG_FUNCTION_INFO_V1( active_workers );
@@ -94,7 +100,10 @@ get_worker_slots_size(void)
  * Common function to start background worker
  */
 static void
-start_bg_worker(bgworker_main_type main_func, int arg, bool wait)
+start_bg_worker(char name[BGW_MAXLEN],
+				bgworker_main_type main_func,
+				int arg,
+				bool wait)
 {
 #define HandleError(condition, new_state) \
 	if (condition) { exec_state = (new_state); goto handle_exec_state; }
@@ -115,6 +124,7 @@ start_bg_worker(bgworker_main_type main_func, int arg, bool wait)
 	pid_t					pid;
 
 	/* Initialize worker struct */
+	memcpy(worker.bgw_name, name, BGW_MAXLEN);
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
 		BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
@@ -206,7 +216,8 @@ create_partitions_bg_worker(Oid relid, Datum value, Oid value_type)
 	memcpy(segment_pointer, args, args_size);
 
 	/* start worker and wait for it to finish */
-	start_bg_worker(create_partitions_bg_worker_main,
+	start_bg_worker("create partitions worker",
+					create_partitions_bg_worker_main,
 					segment_handle,
 					true);
 
@@ -274,7 +285,8 @@ partition_data_worker( PG_FUNCTION_ARGS )
 	args->total_rows = 0;
 
 	/* start worker and wait for it to finish */
-	start_bg_worker(partition_data_bg_worker_main,
+	start_bg_worker("partition data worker",
+					partition_data_bg_worker_main,
 					empty_slot_idx,
 					false);
 	elog(NOTICE,
@@ -388,6 +400,27 @@ create_partitions(Oid relid, Datum value, Oid value_type, bool *crashed)
 }
 
 /*
+ * When we receive a SIGTERM, we set InterruptPending and ProcDiePending just
+ * like a normal backend.  The next CHECK_FOR_INTERRUPTS() will do the right
+ * thing.
+ */
+static void
+handle_sigterm(SIGNAL_ARGS)
+{
+	int			save_errno = errno;
+
+	SetLatch(MyLatch);
+
+	if (!proc_exit_inprogress)
+	{
+		InterruptPending = true;
+		ProcDiePending = true;
+	}
+
+	errno = save_errno;
+}
+
+/*
  * Main worker routine. Accepts dsm_handle as an argument
  */
 static void
@@ -411,7 +444,11 @@ partition_data_bg_worker_main(Datum main_arg)
 	vals[0] = args->key.relid;
 	vals[1] = 10000;
 
-	// sleep(20);
+	/* Establish signal handlers before unblocking signals. */
+	pqsignal(SIGTERM, handle_sigterm);
+
+	/* We're now ready to receive signals */
+	BackgroundWorkerUnblockSignals();
 
 	/* Establish connection and start transaction */
 	BackgroundWorkerInitializeConnectionByOid(args->key.dbid, InvalidOid);
